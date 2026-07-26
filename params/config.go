@@ -514,7 +514,32 @@ func (c CliqueConfig) String() string {
 }
 
 // RandomXConfig is the consensus engine config for RandomX proof-of-work sealing.
-type RandomXConfig struct{}
+type RandomXConfig struct {
+	// TipTreasury, when set, receives TreasuryFeePercent of every transaction's
+	// priority fee (tip); the miner/validator coinbase gets the remainder.
+	TipTreasury *common.Address `json:"tipTreasury,omitempty"`
+	// BaseFeeTreasury, when set, receives TreasuryFeePercent of every
+	// transaction's base fee (which would otherwise be entirely burned); the
+	// rest of the base fee keeps being burned.
+	BaseFeeTreasury *common.Address `json:"baseFeeTreasury,omitempty"`
+	// TreasuryFeePercent is the percentage (0-100) routed to the treasuries.
+	// Zero or absent means no cut — there is deliberately no implicit default,
+	// as a hidden default on a consensus-critical parameter is a footgun.
+	// Consensus-critical: must be identical on every node.
+	TreasuryFeePercent uint64 `json:"treasuryFeePercent,omitempty"`
+}
+
+// FeePercent returns the treasury cut percentage, clamped to 100. Zero (or an
+// absent field) disables the treasury split entirely.
+func (c *RandomXConfig) FeePercent() uint64 {
+	if c == nil {
+		return 0
+	}
+	if c.TreasuryFeePercent > 100 {
+		return 100
+	}
+	return c.TreasuryFeePercent
+}
 
 // String implements the stringer interface, returning the consensus engine details.
 func (c RandomXConfig) String() string {

@@ -85,6 +85,53 @@ func TestSealAndVerify(t *testing.T) {
 	}
 }
 
+// emptyChain answers no headers, modelling a node whose local chain does not yet
+// contain the epoch seed block for the header under check.
+type emptyChain struct{ stubChain }
+
+func (emptyChain) GetHeaderByNumber(uint64) *types.Header { return nil }
+
+// TestVerifySealPublic checks the P2P-facing VerifySeal gate: a genuinely mined
+// block passes, a tampered one is rejected, and a header whose epoch seed block
+// is missing locally reports ErrUnknownSeedBlock (deferred, not rejected).
+func TestVerifySealPublic(t *testing.T) {
+	engine := New(Config{PowMode: ModeNormal})
+	defer engine.Close()
+
+	chain := stubChain{}
+	block := types.NewBlockWithHeader(newTestHeader(200))
+	results := make(chan *types.Block, 1)
+	stop := make(chan struct{})
+	defer close(stop)
+	if err := engine.Seal(chain, block, results, stop); err != nil {
+		t.Fatalf("seal failed: %v", err)
+	}
+
+	var sealed *types.Block
+	select {
+	case sealed = <-results:
+	case <-time.After(30 * time.Second):
+		t.Fatal("sealing timed out")
+	}
+
+	// Genuine seal must pass the public gate.
+	if err := engine.VerifySeal(chain, sealed.Header()); err != nil {
+		t.Fatalf("mined block rejected by VerifySeal: %v", err)
+	}
+
+	// Tampered seal (nonce bumped, mix now stale) must fail as invalid.
+	bad := types.CopyHeader(sealed.Header())
+	bad.Nonce = types.EncodeNonce(sealed.Nonce() + 1)
+	if err := engine.VerifySeal(chain, bad); err == nil {
+		t.Fatal("VerifySeal accepted a tampered seal")
+	}
+
+	// Seed block missing locally: neither valid nor invalid, defer.
+	if err := engine.VerifySeal(emptyChain{}, sealed.Header()); err != ErrUnknownSeedBlock {
+		t.Fatalf("expected ErrUnknownSeedBlock, got %v", err)
+	}
+}
+
 // TestFakerAcceptsAnySeal ensures the fake engine short-circuits PoW verification.
 func TestFakerAcceptsAnySeal(t *testing.T) {
 	engine := NewFaker()

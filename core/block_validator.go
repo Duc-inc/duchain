@@ -133,6 +133,15 @@ func (v *BlockValidator) ValidateBody(block *types.Block) error {
 		return errors.New("block had access list before Amsterdam")
 	}
 
+	// duchain: enforce validator-pinned transactions. A transaction that pins a
+	// validator (via the ValidatorPin sentinel in its access list) is only valid
+	// inside a block mined by that exact validator (coinbase).
+	for i, tx := range block.Transactions() {
+		if validator, ok := types.PinnedValidator(tx); ok && validator != header.Coinbase {
+			return fmt.Errorf("validator-pinned transaction at index %d: block coinbase %x != pinned validator %x", i, header.Coinbase, validator)
+		}
+	}
+
 	// Ancestor block must be known.
 	if !v.bc.HasBlockAndState(block.ParentHash(), block.NumberU64()-1) {
 		if !v.bc.HasBlock(block.ParentHash(), block.NumberU64()-1) {

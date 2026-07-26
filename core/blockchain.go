@@ -1665,21 +1665,34 @@ func (bc *BlockChain) GetTd(hash common.Hash, number uint64) *big.Int {
 	if td := rawdb.ReadTd(bc.db, hash, number); td != nil {
 		return td
 	}
-	header := bc.GetHeader(hash, number)
-	if header == nil {
-		return nil
-	}
-	var td *big.Int
-	if number == 0 {
-		td = new(big.Int).Set(header.Difficulty)
-	} else {
-		parentTd := bc.GetTd(header.ParentHash, number-1)
-		if parentTd == nil {
+	// Walk back (iteratively — the gap can be the whole chain, so recursion would
+	// blow the stack) to the nearest ancestor with a stored TD, collecting the
+	// headers in between, then replay forward accumulating and persisting.
+	var (
+		pending []*types.Header // headers missing a TD, newest first
+		td      *big.Int
+	)
+	for {
+		header := bc.GetHeader(hash, number)
+		if header == nil {
 			return nil
 		}
-		td = new(big.Int).Add(parentTd, header.Difficulty)
+		pending = append(pending, header)
+		if number == 0 {
+			td = new(big.Int) // genesis TD is its own difficulty, added below
+			break
+		}
+		if ptd := rawdb.ReadTd(bc.db, header.ParentHash, number-1); ptd != nil {
+			td = new(big.Int).Set(ptd)
+			break
+		}
+		hash, number = header.ParentHash, number-1
 	}
-	rawdb.WriteTd(bc.db, hash, number, td)
+	for i := len(pending) - 1; i >= 0; i-- {
+		header := pending[i]
+		td = new(big.Int).Add(td, header.Difficulty)
+		rawdb.WriteTd(bc.db, header.Hash(), header.Number.Uint64(), td)
+	}
 	return td
 }
 

@@ -116,7 +116,8 @@ type handler struct {
 	networkID uint64
 	synced    atomic.Bool // Flag whether we're considered synchronised (enables transaction processing)
 
-	backfilling atomic.Bool // Single-flight guard for the RandomX backfill syncer
+	backfilling atomic.Bool    // Single-flight guard for the RandomX backfill syncer
+	guard       *announceGuard // Per-peer rate limits, strikes and bans for RandomX block gossip
 
 	database ethdb.Database
 	txpool   txPool
@@ -152,6 +153,7 @@ func newHandler(config *handlerConfig) (*handler, error) {
 		txpool:         config.TxPool,
 		chain:          config.Chain,
 		peers:          newPeerSet(),
+		guard:          newAnnounceGuard(),
 		txBroadcastKey: newBroadcastChoiceKey(),
 		requiredBlocks: config.RequiredBlocks,
 		quitSync:       make(chan struct{}),
@@ -244,6 +246,12 @@ func (h *handler) runEthPeer(peer *eth.Peer, handler eth.Handler) error {
 	if err := peer.Handshake(h.networkID, h.chain, h.blockRange.currentRange()); err != nil {
 		peer.Log().Debug("Ethereum handshake failed", "err", err)
 		return err
+	}
+	// Refuse peers that were recently banned for RandomX protocol violations
+	// (invalid PoW announcements, announcement floods, bogus backfill data).
+	if h.chain.Config().RandomX != nil && h.guard.isBanned(peer.ID()) {
+		peer.Log().Debug("Rejecting banned Ethereum peer")
+		return p2p.DiscUselessPeer
 	}
 	reject := false // reserved peer slots
 	if h.downloader.ConfigSyncMode() == ethconfig.SnapSync {
@@ -405,6 +413,7 @@ func (h *handler) unregisterPeer(id string) {
 	}
 	h.downloader.UnregisterPeer(id)
 	h.txFetcher.Drop(id)
+	h.guard.forget(id)
 
 	if err := h.peers.unregisterPeer(id); err != nil {
 		logger.Error("Ethereum peer removal failed", "err", err)

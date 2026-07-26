@@ -76,6 +76,19 @@ func seedHash(chain consensus.ChainHeaderReader, number uint64) []byte {
 	return crypto.Keccak256(buf[:])
 }
 
+// seedAvailable reports whether the seed block needed to derive the RandomX key
+// for the given block number is present in the local chain, i.e. whether seedHash
+// would return the real chain-derived key rather than its fallback.
+func seedAvailable(chain consensus.ChainHeaderReader, number uint64) bool {
+	epoch := number / epochLength
+
+	var seedNumber uint64
+	if epoch > 0 {
+		seedNumber = epoch*epochLength - 1
+	}
+	return chain.GetHeaderByNumber(seedNumber) != nil
+}
+
 // sealInput packs the sealing hash and nonce into the byte slice that is fed to
 // RandomX. The layout is the 32-byte seal hash followed by the 8-byte big-endian
 // nonce.

@@ -22,10 +22,12 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/consensus/randomx"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/eth/protocols/eth"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 )
 
@@ -103,6 +105,48 @@ func (h *ethHandler) handleNewBlock(peer *eth.Peer, block *types.Block) error {
 	if block == nil {
 		return nil
 	}
+	// Rate-limit announcements per peer before doing any work at all. Excess
+	// messages are ignored; a peer flooding far past the limit is banned and
+	// dropped (returning an error disconnects it).
+	if ok, hard := h.guard.allowAnnounce(peer.ID()); !ok {
+		if hard {
+			h.guard.ban(peer.ID())
+			return errors.New("NewBlock announcement flood")
+		}
+		log.Debug("Throttling block announcements", "peer", peer.ID())
+		return nil
+	}
+	header := block.Header()
+	// Cheap sanity gate before spending any hashing effort on the announcement.
+	if header.Time > uint64(time.Now().Unix()+15) {
+		log.Debug("Ignoring future-dated propagated block", "number", block.NumberU64(), "peer", peer.ID())
+		return nil
+	}
+	// Authenticate the announcement with its own PoW seal whenever the epoch key
+	// is derivable from our local chain, so a peer cannot trigger imports or
+	// backfills for free. A bogus seal is a protocol violation: ban the peer and
+	// return the error to drop it. When the seed block is beyond our head the
+	// seal can't be checked yet; the backfill import then validates everything
+	// block by block.
+	if pow, ok := h.chain.Engine().(*randomx.RandomX); ok {
+		switch err := pow.VerifySeal(h.chain, header); {
+		case err == nil, errors.Is(err, randomx.ErrUnknownSeedBlock):
+		default:
+			h.guard.ban(peer.ID())
+			return fmt.Errorf("propagated block #%d [%x] has invalid PoW seal: %w", block.NumberU64(), block.Hash(), err)
+		}
+	}
+	// When the parent is known, the header can be validated in full right now —
+	// including the declared difficulty against the LWMA retarget — closing the
+	// "cheap minimum-difficulty header" hole left by the seal-only gate above.
+	// Failure is likewise a protocol violation: ban and drop.
+	parentKnown := h.chain.GetHeader(header.ParentHash, header.Number.Uint64()-1) != nil
+	if parentKnown {
+		if err := h.chain.Engine().VerifyHeader(h.chain, header); err != nil {
+			h.guard.ban(peer.ID())
+			return fmt.Errorf("propagated block #%d [%x] has invalid header: %w", block.NumberU64(), block.Hash(), err)
+		}
+	}
 	// If the block is more than one ahead of our head, we're missing its
 	// ancestors. Backfill the gap from this peer instead of failing the import;
 	// the announced block will land once we've caught up.
@@ -112,6 +156,13 @@ func (h *ethHandler) handleNewBlock(peer *eth.Peer, block *types.Block) error {
 		return nil
 	}
 	if _, err := h.chain.InsertChain(types.Blocks{block}); err != nil {
+		// With the header fully validated above (parent known), an import failure
+		// means forged content (bad body/state): count it against the peer. With
+		// an unknown parent the failure can be benign (we're mid-reorg or behind).
+		if parentKnown && h.guard.strike(peer.ID()) {
+			h.guard.ban(peer.ID())
+			return fmt.Errorf("repeated invalid propagated blocks, last: %w", err)
+		}
 		log.Debug("Failed to import propagated block", "number", block.NumberU64(), "hash", block.Hash(), "err", err)
 		return nil
 	}
@@ -152,6 +203,14 @@ func (h *ethHandler) backfill(peer *eth.Peer, target uint64) {
 		}
 		blocks := h.assembleBlocks(peer, headers)
 		if _, err := h.chain.InsertChain(blocks); err != nil {
+			// We asked this peer for its canonical chain from a common ancestor,
+			// so consensus-invalid data here is the peer's fault: strike it, and
+			// ban + disconnect on repeat offence. (Network errors above, by
+			// contrast, are not counted.)
+			if h.guard.strike(peer.ID()) {
+				h.guard.ban(peer.ID())
+				peer.Disconnect(p2p.DiscSubprotocolError)
+			}
 			log.Debug("RandomX backfill import failed", "from", next, "err", err)
 			return
 		}
@@ -216,8 +275,12 @@ func (h *ethHandler) fetchBodies(peer *eth.Peer, hashes []common.Hash) ([]*eth.B
 
 	select {
 	case res := <-resCh:
-		resp := *res.Res.(*eth.BlockBodiesResponse)
+		bodies, ok := res.Res.(*eth.BlockBodiesResponse)
 		res.Done <- nil
+		if !ok {
+			return nil, fmt.Errorf("unexpected body response type %T", res.Res)
+		}
+		resp := *bodies
 		out := make([]*eth.BlockBody, len(resp))
 		for i := range resp {
 			out[i] = &resp[i]
@@ -228,24 +291,32 @@ func (h *ethHandler) fetchBodies(peer *eth.Peer, hashes []common.Hash) ([]*eth.B
 	}
 }
 
-// findCommonAncestor walks back from our head (capped at target) until our
-// canonical block hash matches the peer's header at the same height, returning
-// that block number. Falls back to genesis (0) if no match is found.
+// findCommonAncestor binary-searches for the highest block number at which our
+// canonical chain and the peer's agree, returning that number. Since both sides
+// are canonical chains sharing the same genesis, "hashes match at height n" is
+// monotone (true up to the fork point, false after), so a bisection over
+// [0, min(head, target)] needs only O(log n) header round trips. Any fetch or
+// lookup failure is treated conservatively as a mismatch; the worst case is
+// falling back toward genesis (0), never past the true ancestor.
 func (h *ethHandler) findCommonAncestor(peer *eth.Peer, target uint64) uint64 {
-	from := h.chain.CurrentBlock().Number.Uint64()
-	if target < from {
-		from = target
+	hi := h.chain.CurrentBlock().Number.Uint64()
+	if target < hi {
+		hi = target
 	}
-	for n := from; ; n-- {
-		ours := h.chain.GetHeaderByNumber(n)
-		hdrs, err := h.fetchHeaders(peer, n, 1)
+	// Invariant: everything at or below lo matches (genesis is shared), everything
+	// above hi mismatches or is unknown.
+	lo := uint64(0)
+	for lo < hi {
+		mid := lo + (hi-lo+1)/2
+		ours := h.chain.GetHeaderByNumber(mid)
+		hdrs, err := h.fetchHeaders(peer, mid, 1)
 		if err == nil && len(hdrs) == 1 && ours != nil && ours.Hash() == hdrs[0].Hash() {
-			return n
-		}
-		if n == 0 {
-			return 0
+			lo = mid
+		} else {
+			hi = mid - 1
 		}
 	}
+	return lo
 }
 
 // fetchHeaders performs a blocking request for up to amount contiguous headers
@@ -260,9 +331,12 @@ func (h *ethHandler) fetchHeaders(peer *eth.Peer, from uint64, amount int) ([]*t
 
 	select {
 	case res := <-resCh:
-		headers := *res.Res.(*eth.BlockHeadersRequest)
+		headers, ok := res.Res.(*eth.BlockHeadersRequest)
 		res.Done <- nil
-		return headers, nil
+		if !ok {
+			return nil, fmt.Errorf("unexpected header response type %T", res.Res)
+		}
+		return *headers, nil
 	case <-time.After(10 * time.Second):
 		return nil, errors.New("header request timed out")
 	}

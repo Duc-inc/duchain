@@ -44,6 +44,26 @@ var (
 	errInvalidPoW        = errors.New("invalid proof-of-work")
 )
 
+// ErrUnknownSeedBlock is returned by VerifySeal when the header's RandomX epoch
+// key cannot be derived because the epoch's seed block is not in the local chain
+// (e.g. the header is more than an epoch ahead of our head). The seal is then
+// neither valid nor invalid: it simply cannot be checked yet.
+var ErrUnknownSeedBlock = errors.New("randomx seed block not available")
+
+// VerifySeal checks a header's RandomX proof-of-work in isolation (without its
+// ancestors): the mix digest must be the RandomX hash of the seal input and meet
+// the target implied by the header's own declared difficulty. It is used by the
+// P2P layer to authenticate block announcements before acting on them, so a peer
+// cannot trigger work on our side for free. Note that it does NOT validate the
+// declared difficulty against the retarget — that requires the ancestors and is
+// done by VerifyHeader on import.
+func (r *RandomX) VerifySeal(chain consensus.ChainHeaderReader, header *types.Header) error {
+	if !seedAvailable(chain, header.Number.Uint64()) {
+		return ErrUnknownSeedBlock
+	}
+	return r.verifySeal(chain, header)
+}
+
 // VerifyHeader checks whether a header conforms to the RandomX consensus rules.
 func (r *RandomX) VerifyHeader(chain consensus.ChainHeaderReader, header *types.Header) error {
 	if r.config.PowMode == ModeFullFake {

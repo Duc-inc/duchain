@@ -722,11 +722,13 @@ func (st *stateTransition) execute() (*ExecutionResult, error) {
 
 	// Pay the effective transaction fee to the specific coinbase
 	effectiveTip := msg.GasPrice
+	var baseFeeU256 *uint256.Int
 	if rules.IsLondon {
 		baseFee, overflow := uint256.FromBig(st.evm.Context.BaseFee)
 		if overflow {
 			return nil, fmt.Errorf("invalid baseFee: %v", st.evm.Context.BaseFee)
 		}
+		baseFeeU256 = baseFee
 		effectiveTip = new(uint256.Int).Sub(msg.GasPrice, baseFee)
 	}
 	if st.evm.Config.NoBaseFee && msg.GasFeeCap.Sign() == 0 && msg.GasTipCap.Sign() == 0 {
@@ -736,6 +738,27 @@ func (st *stateTransition) execute() (*ExecutionResult, error) {
 	} else {
 		fee := new(uint256.Int).SetUint64(gasUsed)
 		fee.Mul(fee, effectiveTip)
+
+		// duchain RandomX treasury fee split: route a fixed percentage of the
+		// priority fee (tip) to TipTreasury, and the same percentage of the
+		// otherwise-burned base fee to BaseFeeTreasury. Consensus-critical: the
+		// config is sourced from the (shared) genesis, so every node agrees.
+		if rxCfg := st.evm.ChainConfig().RandomX; rxCfg != nil {
+			pct := rxCfg.FeePercent()
+			if rxCfg.TipTreasury != nil && pct > 0 {
+				if cut := treasuryCut(fee, pct); cut.Sign() > 0 {
+					fee = new(uint256.Int).Sub(fee, cut)
+					st.state.AddBalance(*rxCfg.TipTreasury, cut, tracing.BalanceIncreaseRewardTransactionFee)
+				}
+			}
+			if rxCfg.BaseFeeTreasury != nil && baseFeeU256 != nil && pct > 0 {
+				baseFeeTotal := new(uint256.Int).Mul(new(uint256.Int).SetUint64(gasUsed), baseFeeU256)
+				if cut := treasuryCut(baseFeeTotal, pct); cut.Sign() > 0 {
+					st.state.AddBalance(*rxCfg.BaseFeeTreasury, cut, tracing.BalanceIncreaseRewardTransactionFee)
+				}
+			}
+		}
+
 		st.state.AddBalance(st.evm.Context.Coinbase, fee, tracing.BalanceIncreaseRewardTransactionFee)
 
 		// add the coinbase to the witness iff the fee is greater than 0
@@ -965,4 +988,12 @@ func (st *stateTransition) calcRefund(gasUsedBeforeRefund uint64) uint64 {
 // blobGasUsed returns the amount of blob gas used by the message.
 func (st *stateTransition) blobGasUsed() uint64 {
 	return uint64(len(st.msg.BlobHashes) * params.BlobTxBlobGasPerBlob)
+}
+
+// treasuryCut returns amount*percent/100, the share of a fee pot routed to a
+// duchain RandomX treasury address. Integer division rounds down, so the
+// remainder stays with the coinbase (tip) or is burned (base fee).
+func treasuryCut(amount *uint256.Int, percent uint64) *uint256.Int {
+	cut := new(uint256.Int).Mul(amount, uint256.NewInt(percent))
+	return cut.Div(cut, uint256.NewInt(100))
 }

@@ -497,6 +497,15 @@ func (miner *Miner) commitTransactions(ctx context.Context, env *environment, pl
 			continue
 		}
 
+		// duchain: skip validator-pinned transactions that aren't pinned to this
+		// miner. They stay in the pool until the chosen validator builds a block;
+		// including one here would produce a block rejected by ValidateBody.
+		if validator, ok := types.PinnedValidator(tx); ok && validator != env.coinbase {
+			log.Trace("Skipping transaction pinned to another validator", "hash", ltx.Hash, "validator", validator)
+			txs.Pop()
+			continue
+		}
+
 		// if inclusion of the transaction would put the block size over the
 		// maximum we allow, don't add any more txs to the payload.
 		if !env.txFitsSize(tx) {

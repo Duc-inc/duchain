@@ -1,7 +1,7 @@
 # duchain RandomX public testnet
 
 A launchable configuration for the duchain RandomX proof-of-work testnet
-(chainId **17171**). These scripts wrap the `geth-randomx` binary; the actual
+(chainId **61102**). These scripts wrap the `geth-randomx` binary; the actual
 hosting (servers, public IPs, DNS) is yours to provide.
 
 ## 0. Prerequisites
@@ -36,11 +36,33 @@ network.
 - `GETH_RANDOMX_FULLMEM=1` — fast full-dataset mining (~2.3 GiB RAM), much faster hashing.
 
 ## Parameters
-- chainId / networkId: **17171**
+- chainId / networkId: **61102** (from "061102" — leading zeros don't exist on integer chain ids)
 - Consensus: RandomX PoW, LWMA retarget (target ~12 s/block, window 60)
 - Genesis difficulty: `0x800` (self-adjusts via LWMA)
 - Block reward: 2 coins, halving every 2,100,000 blocks
 - Forks: Homestead…London at genesis; no Shanghai/Cancun (PoW chain, no withdrawals/blobs)
+
+## Optional: treasury fee split
+The RandomX engine can route a fixed percentage of each transaction's fees to
+treasury addresses. **Opt-in** — if the fields below are absent the miner keeps
+100% of the tip and the full base fee is burned (default Ethereum behaviour).
+
+Add to the `randomx` object in `genesis.json` (consensus-critical — must be
+**identical on every node**):
+```json
+"randomx": {
+  "tipTreasury": "0x...",        // gets treasuryFeePercent of the priority fee (tip)
+  "baseFeeTreasury": "0x...",    // gets treasuryFeePercent of the (else-burned) base fee
+  "treasuryFeePercent": 5         // 0-100; zero or omitted disables the split
+}
+```
+- **No implicit default**: omitting `treasuryFeePercent` (or setting it to 0)
+  means no cut is taken, even if treasury addresses are set. Values above 100
+  are clamped to 100.
+- The miner/coinbase receives the remaining (100 − percent)% of the tip.
+- The remaining base fee keeps being burned (EIP-1559).
+- Either address may be set independently (set only `tipTreasury` to split just the tip).
+- Validated end-to-end: with percent 5, each treasury receives exactly 5% of its pot.
 
 ## ⚠️ This is a TESTNET, not a mainnet
 It has **not** been security-audited, the network hardening is partial (no

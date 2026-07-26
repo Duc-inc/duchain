@@ -8,7 +8,7 @@ set -euo pipefail
 GETH="${GETH:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/build/geth-randomx}"
 
 # Network identity. The network id MUST match the genesis chainId.
-NETWORK_ID="${NETWORK_ID:-17171}"
+NETWORK_ID="${NETWORK_ID:-61102}"
 GENESIS="${GENESIS:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/genesis.json}"
 
 # Comma-separated bootnode enodes that new nodes dial to discover the network.
