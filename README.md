@@ -42,8 +42,11 @@ just `geth-randomx` with plain flags, like real geth. A separate `testnet/`
 
 ## Quick start
 
+Requires `librandomx` installed — see
+[`consensus/randomx/README.md`](consensus/randomx/README.md).
+
 ```bash
-go build -tags randomx ./...      # requires librandomx, see consensus/randomx/README.md
+CGO_ENABLED=1 go build -tags randomx -o build/geth-randomx ./cmd/geth
 ```
 
 ### Ducros (DUC) mainnet
