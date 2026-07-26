@@ -28,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/types/bal"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto/keccak"
 	"github.com/ethereum/go-ethereum/log"
@@ -175,8 +176,10 @@ func (r *RandomX) Prepare(chain consensus.ChainHeaderReader, header *types.Heade
 }
 
 // Finalize implements consensus.Engine, crediting the coinbase with the fixed
-// block reward. RandomX has no uncles, so no uncle rewards are paid.
-func (r *RandomX) Finalize(chain consensus.ChainHeaderReader, header *types.Header, state vm.StateDB, body *types.Body) {
+// block reward. RandomX has no uncles, so no uncle rewards are paid. RandomX
+// mines no withdrawals and does not populate block access lists itself, so
+// blockAccessIndex and bal (added for the Amsterdam fork) are unused here.
+func (r *RandomX) Finalize(chain consensus.ChainHeaderReader, header *types.Header, state vm.StateDB, body *types.Body, blockAccessIndex uint32, bal *bal.ConstructionBlockAccessList) {
 	reward := calcBlockReward(header.Number.Uint64())
 	if !reward.IsZero() {
 		state.AddBalance(header.Coinbase, reward, tracing.BalanceIncreaseRewardMineBlock)
