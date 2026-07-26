@@ -8,8 +8,11 @@ independent, PoW-secured chain — no beacon chain, no consensus client, no
 staking.
 
 The mainnet built with this code is **Ducros** (ticker **DUC**, chainId
-**271017**) — see [`mainnet/README.md`](mainnet/README.md). A separate
-`testnet/` (chainId 61102) exists for development/testing.
+**271017**) — its genesis is baked directly into the binary
+(`params.MainnetChainConfig`), the same way upstream go-ethereum embeds real
+Ethereum mainnet, so there's no launch-scripts folder or genesis file to run:
+just `geth-randomx` with plain flags, like real geth. A separate `testnet/`
+(chainId 61102, file-based genesis) exists for development/testing.
 
 > ⚠️ **Status: unaudited.** Do not attach real economic value without reading
 > [`SECURITY_REVIEW.md`](SECURITY_REVIEW.md) for the current security posture.
@@ -43,11 +46,37 @@ The mainnet built with this code is **Ducros** (ticker **DUC**, chainId
 go build -tags randomx ./...      # requires librandomx, see consensus/randomx/README.md
 ```
 
-- **Mainnet (Ducros / DUC)**: see [`mainnet/README.md`](mainnet/README.md). No
-  genesis file needed — the binary boots Ducros by default, same as upstream
-  geth boots real Ethereum mainnet with zero flags.
-- **Testnet**: see [`testnet/README.md`](testnet/README.md) — file-based
-  genesis (chainId **61102**), meant for development/iteration.
+### Ducros (DUC) mainnet
+
+No genesis file, no `--networkid` (it auto-derives from the embedded chainId
+271017), no launch scripts — same as running plain `geth` on real Ethereum
+mainnet. Open P2P port 30303 (TCP+UDP) on the firewall of any host you run
+this on.
+
+```bash
+# One-time: only whoever hosts the network's stable entry point runs this.
+# Once params.MainnetBootnodes is populated with a real server, nobody else needs to.
+./build/geth-randomx --datadir ~/.duchain-boot --port 30303 --nat extip:<public-ip>
+
+# Get its enode (send it to be baked into params/bootnodes.go as MainnetBootnodes):
+./build/geth-randomx attach --exec admin.nodeInfo.enode ~/.duchain-boot/geth.ipc
+
+# A mining node (until MainnetBootnodes is populated, add --bootnodes <enode> from above):
+./build/geth-randomx --datadir ~/.duchain --port 30303 --nat extip:<this-host-ip> \
+  --mine --miner.etherbase 0xYourAddress
+
+# A non-mining full node with JSON-RPC (e.g. for MetaMask/explorers):
+./build/geth-randomx --datadir ~/.duchain-node --port 30303 --nat extip:<this-host-ip> \
+  --http --http.addr 0.0.0.0 --http.port 8545 --http.api eth,net,web3,txpool
+```
+
+- `GETH_RANDOMX_THREADS=N` — mining threads (each light-mode thread holds ~256 MiB). Default: one per CPU.
+- `GETH_RANDOMX_FULLMEM=1` — fast full-dataset mining (~2.3 GiB RAM), much faster hashing.
+
+### Testnet
+
+See [`testnet/README.md`](testnet/README.md) — file-based genesis (chainId
+**61102**), meant for development/iteration before anything lands on mainnet.
 
 ## Security
 
