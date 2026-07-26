@@ -121,8 +121,9 @@ type Ethereum struct {
 
 	APIBackend *EthAPIBackend
 
-	miner    *miner.Miner
-	gasPrice *big.Int
+	miner     *miner.Miner
+	minerExit chan struct{} // Closed to stop the RandomX proof-of-work mining loop
+	gasPrice  *big.Int
 
 	networkID     uint64
 	netRPCService *ethapi.NetAPI
@@ -480,6 +481,13 @@ func (s *Ethereum) Start() error {
 	// start log indexer
 	s.filterMaps.Start()
 	go s.updateFilterMapsHeads()
+
+	// On RandomX (proof-of-work) networks, optionally start the local mining loop.
+	// PoS networks ignore this; their blocks come from the consensus client.
+	if s.blockchain.Config().RandomX != nil && s.config.Miner.Mining {
+		s.minerExit = make(chan struct{})
+		go s.miner.MineRandomX(s.config.Miner.PendingFeeRecipient, s.minerExit)
+	}
 	return nil
 }
 
@@ -594,6 +602,12 @@ func (s *Ethereum) setupDiscovery() error {
 // Stop implements node.Lifecycle, terminating all internal goroutines used by the
 // Ethereum protocol.
 func (s *Ethereum) Stop() error {
+	// Stop the RandomX mining loop, if running.
+	if s.minerExit != nil {
+		close(s.minerExit)
+		s.minerExit = nil
+	}
+
 	// Stop all the peer-related stuff first.
 	s.discmix.Close()
 	s.dropper.Stop()

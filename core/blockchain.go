@@ -1658,6 +1658,31 @@ func (bc *BlockChain) writeKnownBlock(block *types.Block) error {
 	return nil
 }
 
+// GetTd retrieves a block's total difficulty (the sum of all block difficulties
+// from genesis), computing and persisting it lazily if absent. It underpins the
+// RandomX proof-of-work fork-choice rule. Returns nil if the block is unknown.
+func (bc *BlockChain) GetTd(hash common.Hash, number uint64) *big.Int {
+	if td := rawdb.ReadTd(bc.db, hash, number); td != nil {
+		return td
+	}
+	header := bc.GetHeader(hash, number)
+	if header == nil {
+		return nil
+	}
+	var td *big.Int
+	if number == 0 {
+		td = new(big.Int).Set(header.Difficulty)
+	} else {
+		parentTd := bc.GetTd(header.ParentHash, number-1)
+		if parentTd == nil {
+			return nil
+		}
+		td = new(big.Int).Add(parentTd, header.Difficulty)
+	}
+	rawdb.WriteTd(bc.db, hash, number, td)
+	return td
+}
+
 // writeBlockWithState writes block, metadata and corresponding state data to the
 // database.
 func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.Receipt, statedb *state.StateDB) error {
@@ -1677,6 +1702,10 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 	rawdb.WriteBlock(batch, block)
 	rawdb.WriteReceipts(batch, block.Hash(), block.NumberU64(), receipts)
 	rawdb.WritePreimages(batch, statedb.Preimages())
+	// Persist the block's total difficulty for proof-of-work fork choice.
+	if ptd := bc.GetTd(block.ParentHash(), block.NumberU64()-1); ptd != nil {
+		rawdb.WriteTd(batch, block.Hash(), block.NumberU64(), new(big.Int).Add(ptd, block.Difficulty()))
+	}
 	if err := batch.Write(); err != nil {
 		log.Crit("Failed to write block into disk", "err", err)
 	}
@@ -1780,8 +1809,20 @@ func (bc *BlockChain) writeBlockAndSetHead(block *types.Block, receipts []*types
 	}
 	currentBlock := bc.CurrentBlock()
 
-	// Reorganise the chain if the parent is not the head block
+	// Reorganise the chain if the parent is not the head block.
 	if block.ParentHash() != currentBlock.Hash() {
+		// Fork choice: on RandomX proof-of-work networks a block that doesn't
+		// directly extend the head only becomes canonical if its total difficulty
+		// strictly exceeds the current head's. Equal-or-lighter forks are stored as
+		// side blocks (first-seen wins on ties). On PoS networks TD is meaningless,
+		// so the inserted block is always accepted as head (post-merge behaviour).
+		if bc.chainConfig.RandomX != nil {
+			localTd := bc.GetTd(currentBlock.Hash(), currentBlock.Number.Uint64())
+			blockTd := bc.GetTd(block.Hash(), block.NumberU64())
+			if localTd != nil && blockTd != nil && blockTd.Cmp(localTd) <= 0 {
+				return SideStatTy, nil
+			}
+		}
 		if err := bc.reorg(currentBlock, block.Header()); err != nil {
 			return NonStatTy, err
 		}

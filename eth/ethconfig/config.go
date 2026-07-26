@@ -19,6 +19,8 @@ package ethconfig
 
 import (
 	"errors"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -26,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/beacon"
 	"github.com/ethereum/go-ethereum/consensus/clique"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
+	"github.com/ethereum/go-ethereum/consensus/randomx"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/history"
 	"github.com/ethereum/go-ethereum/core/txpool/blobpool"
@@ -227,6 +230,22 @@ type Config struct {
 // Clique is allowed for now to live standalone, but ethash is forbidden and can
 // only exist on already merged networks.
 func CreateConsensusEngine(config *params.ChainConfig, db ethdb.Database) (consensus.Engine, error) {
+	// RandomX is a standalone proof-of-work engine: the network is never merged,
+	// so it is not wrapped in the beacon engine and does not require a terminal
+	// total difficulty.
+	if config.RandomX != nil {
+		// Full-dataset ("fast") mining mode is a node-local performance choice, so
+		// it is opted into via an environment variable rather than the genesis.
+		// It needs ~2.3 GiB of RAM; otherwise light mode is used. The mining thread
+		// count is likewise node-local (each light-mode thread holds a ~256 MiB
+		// cache), defaulting to one per CPU.
+		fullMem := os.Getenv("GETH_RANDOMX_FULLMEM") == "1"
+		threads := 0
+		if v, err := strconv.Atoi(os.Getenv("GETH_RANDOMX_THREADS")); err == nil {
+			threads = v
+		}
+		return randomx.New(randomx.Config{PowMode: randomx.ModeNormal, FullMemory: fullMem, Threads: threads}), nil
+	}
 	if config.TerminalTotalDifficulty == nil {
 		log.Error("Geth only supports PoS networks. Please transition legacy networks using Geth v1.13.x.")
 		return nil, errors.New("'terminalTotalDifficulty' is not set in genesis block")

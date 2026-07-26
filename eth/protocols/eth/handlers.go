@@ -654,6 +654,20 @@ func handlePooledTransactions(backend Backend, msg Decoder, peer *Peer) error {
 	return backend.Handle(peer, &resp)
 }
 
+func handleNewBlock(backend Backend, msg Decoder, peer *Peer) error {
+	// A new block arrived from a peer (RandomX proof-of-work propagation).
+	packet := new(NewBlockPacket)
+	if err := msg.Decode(packet); err != nil {
+		return err
+	}
+	if packet.Block == nil {
+		return fmt.Errorf("NewBlock: empty block")
+	}
+	// Remember the peer has this block so we don't gossip it straight back.
+	peer.markBlock(packet.Block.Hash())
+	return backend.Handle(peer, packet)
+}
+
 func handleBlockRangeUpdate(backend Backend, msg Decoder, peer *Peer) error {
 	var update BlockRangeUpdatePacket
 	if err := msg.Decode(&update); err != nil {

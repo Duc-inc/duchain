@@ -38,6 +38,10 @@ const (
 	// before starting to randomly evict them.
 	maxKnownTxs = 32768
 
+	// maxKnownBlocks is the maximum block hashes to keep in the known list before
+	// starting to randomly evict them.
+	maxKnownBlocks = 1024
+
 	// maxQueuedTxs is the maximum number of transactions to queue up before dropping
 	// older broadcasts.
 	maxQueuedTxs = 4096
@@ -68,6 +72,7 @@ type Peer struct {
 
 	txpool      TxPool             // Transaction pool used by the broadcasters for liveness checks
 	knownTxs    *knownCache        // Set of transaction hashes known to be known by this peer
+	knownBlocks *knownCache        // Set of block hashes known to be known by this peer
 	txBroadcast chan []common.Hash // Channel used to queue transaction propagation requests
 	txAnnounce  chan []common.Hash // Channel used to queue transaction announcement requests
 
@@ -95,6 +100,7 @@ func NewPeer(version uint, p *p2p.Peer, rw p2p.MsgReadWriter, txpool TxPool, cha
 		rw:            rw,
 		version:       version,
 		knownTxs:      newKnownCache(maxKnownTxs),
+		knownBlocks:   newKnownCache(maxKnownBlocks),
 		txBroadcast:   make(chan []common.Hash),
 		txAnnounce:    make(chan []common.Hash),
 		tracker:       tracker.New(cap, id, 5*time.Minute),
@@ -166,6 +172,25 @@ func (p *Peer) SendTransactions(txs types.Transactions) error {
 		p.knownTxs.Add(tx.Hash())
 	}
 	return nil
+}
+
+// KnownBlock reports whether the peer is known to have the block with the given
+// hash (either because it sent it to us or we sent it to them).
+func (p *Peer) KnownBlock(hash common.Hash) bool {
+	return p.knownBlocks.Contains(hash)
+}
+
+// markBlock records that the peer is known to have the given block, so we don't
+// re-announce it back to them.
+func (p *Peer) markBlock(hash common.Hash) {
+	p.knownBlocks.Add(hash)
+}
+
+// SendNewBlock propagates an entire block to the remote peer, marking it as
+// known so it is not sent again.
+func (p *Peer) SendNewBlock(block *types.Block) error {
+	p.knownBlocks.Add(block.Hash())
+	return p2p.Send(p.rw, NewBlockMsg, &NewBlockPacket{Block: block})
 }
 
 // AsyncSendTransactions queues a list of transactions (by hash) to eventually

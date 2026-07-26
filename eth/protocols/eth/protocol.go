@@ -310,8 +310,19 @@ type BlockAccessListPacket struct {
 	List      rlp.RawList[RawBlockAccessList]
 }
 
+// NewBlockPacket is the network packet for propagating a newly produced block.
+// This is a simplified revival of the pre-merge NewBlock message used by the
+// RandomX proof-of-work engine: it carries the full block (no total difficulty
+// field, as fork choice relies on block insertion order).
+type NewBlockPacket struct {
+	Block *types.Block
+}
+
 func (*StatusPacket) Name() string { return "Status" }
 func (*StatusPacket) Kind() byte   { return StatusMsg }
+
+func (*NewBlockPacket) Name() string { return "NewBlock" }
+func (*NewBlockPacket) Kind() byte   { return NewBlockMsg }
 
 func (*TransactionsPacket) Name() string { return "Transactions" }
 func (*TransactionsPacket) Kind() byte   { return TransactionsMsg }

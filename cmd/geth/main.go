@@ -105,6 +105,8 @@ var (
 		utils.DiscoveryPortFlag,
 		utils.MaxPeersFlag,
 		utils.MaxPendingPeersFlag,
+		utils.MiningEnabledFlag,
+		utils.MinerEtherbaseFlag,
 		utils.MinerGasLimitFlag,
 		utils.MinerGasPriceFlag,
 		utils.MinerExtraDataFlag,

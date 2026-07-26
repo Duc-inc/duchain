@@ -590,6 +590,20 @@ var (
 		Usage:    "Maximum number of blobs per block (falls back to protocol maximum if unspecified)",
 		Category: flags.MinerCategory,
 	}
+	// MiningEnabledFlag and MinerEtherbaseFlag were upstream's deprecated PoS-era
+	// flags, removed in go-ethereum #35021. duchain keeps them as first-class
+	// flags: on a RandomX PoW network there is no consensus client to drive block
+	// production, so an explicit opt-in and reward address are required.
+	MiningEnabledFlag = &cli.BoolFlag{
+		Name:     "mine",
+		Usage:    "Enable RandomX proof-of-work mining",
+		Category: flags.MinerCategory,
+	}
+	MinerEtherbaseFlag = &cli.StringFlag{
+		Name:     "miner.etherbase",
+		Usage:    "0x prefixed public address for block mining rewards",
+		Category: flags.MinerCategory,
+	}
 
 	// Account settings
 	PasswordFileFlag = &cli.PathFlag{
@@ -1438,6 +1452,16 @@ func MakeDatabaseHandles(max int) int {
 
 // setEtherbase retrieves the etherbase from the directly specified command line flags.
 func setEtherbase(ctx *cli.Context, cfg *ethconfig.Config) {
+	// On post-merge PoS networks the etherbase is set by the consensus client, but
+	// on RandomX proof-of-work networks --miner.etherbase selects the address that
+	// receives block rewards. It is used as the coinbase when local mining is on.
+	if ctx.IsSet(MinerEtherbaseFlag.Name) {
+		addr := ctx.String(MinerEtherbaseFlag.Name)
+		if !common.IsHexAddress(addr) {
+			Fatalf("-%s: invalid etherbase address %q", MinerEtherbaseFlag.Name, addr)
+		}
+		cfg.Miner.PendingFeeRecipient = common.HexToAddress(addr)
+	}
 	if !ctx.IsSet(MinerPendingFeeRecipientFlag.Name) {
 		return
 	}
@@ -1672,6 +1696,12 @@ func setBlobPool(ctx *cli.Context, cfg *blobpool.Config) {
 }
 
 func setMiner(ctx *cli.Context, cfg *miner.Config) {
+	if ctx.Bool(MiningEnabledFlag.Name) {
+		// On post-merge PoS networks --mine is a no-op (the consensus client drives
+		// block production), but on RandomX proof-of-work networks it enables the
+		// local mining loop. The engine choice is resolved later from the genesis.
+		cfg.Mining = true
+	}
 	if ctx.IsSet(MinerExtraDataFlag.Name) {
 		cfg.ExtraData = []byte(ctx.String(MinerExtraDataFlag.Name))
 	}

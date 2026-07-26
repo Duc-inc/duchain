@@ -200,6 +200,11 @@ func headerHashKey(number uint64) []byte {
 	return append(append(headerPrefix, encodeBlockNumber(number)...), headerHashSuffix...)
 }
 
+// headerTDKey = headerPrefix + num (uint64 big endian) + hash + headerTDSuffix
+func headerTDKey(number uint64, hash common.Hash) []byte {
+	return append(headerKey(number, hash), headerTDSuffix...)
+}
+
 // headerNumberKey = headerNumberPrefix + hash
 func headerNumberKey(hash common.Hash) []byte {
 	return append(headerNumberPrefix, hash.Bytes()...)

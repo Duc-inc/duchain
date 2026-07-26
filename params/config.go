@@ -490,6 +490,7 @@ type ChainConfig struct {
 	// Various consensus engines
 	Ethash             *EthashConfig       `json:"ethash,omitempty"`
 	Clique             *CliqueConfig       `json:"clique,omitempty"`
+	RandomX            *RandomXConfig      `json:"randomx,omitempty"`
 	BlobScheduleConfig *BlobScheduleConfig `json:"blobSchedule,omitempty"`
 }
 
@@ -510,6 +511,14 @@ type CliqueConfig struct {
 // String implements the stringer interface, returning the consensus engine details.
 func (c CliqueConfig) String() string {
 	return fmt.Sprintf("clique(period: %d, epoch: %d)", c.Period, c.Epoch)
+}
+
+// RandomXConfig is the consensus engine config for RandomX proof-of-work sealing.
+type RandomXConfig struct{}
+
+// String implements the stringer interface, returning the consensus engine details.
+func (c RandomXConfig) String() string {
+	return "randomx"
 }
 
 // String implements the fmt.Stringer interface, returning a string representation
@@ -613,6 +622,8 @@ func (c *ChainConfig) Description() string {
 	}
 	banner += fmt.Sprintf("Chain ID:  %v (%s)\n", c.ChainID, network)
 	switch {
+	case c.RandomX != nil:
+		banner += "Consensus: RandomX (proof-of-work)\n"
 	case c.Ethash != nil:
 		banner += "Consensus: Beacon (proof-of-stake), merged from Ethash (proof-of-work)\n"
 	case c.Clique != nil:

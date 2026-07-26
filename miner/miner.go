@@ -50,6 +50,11 @@ type Config struct {
 	GasPrice            *big.Int       // Minimum gas price for mining a transaction
 	Recommit            time.Duration  // The time interval for miner to re-create mining work.
 	MaxBlobsPerBlock    int            // Maximum number of blobs per block (0 for unset uses protocol default)
+
+	// Mining enables the local RandomX proof-of-work mining loop. It has no
+	// effect on post-merge PoS networks, where block production is driven by the
+	// consensus client. The block reward is paid to PendingFeeRecipient.
+	Mining bool `toml:",omitempty"`
 }
 
 // DefaultConfig contains default settings for miner.

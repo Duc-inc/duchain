@@ -1,0 +1,224 @@
+// Copyright 2024 The go-ethereum Authors
+// This file is part of the go-ethereum library.
+//
+// The go-ethereum library is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Lesser General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// The go-ethereum library is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Lesser General Public License for more details.
+//
+// You should have received a copy of the GNU Lesser General Public License
+// along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
+
+// Package randomx implements a proof-of-work consensus engine for go-ethereum
+// based on the RandomX algorithm (the CPU-friendly PoW used by Monero). It pairs
+// the standard Ethereum EVM/state machine with RandomX sealing, an LWMA
+// difficulty retarget and a fixed block reward.
+package randomx
+
+import (
+	"math/big"
+	"sync"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/consensus"
+	"github.com/ethereum/go-ethereum/core/tracing"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/crypto/keccak"
+	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/holiman/uint256"
+)
+
+// two256 is 2^256, the upper bound of a 256-bit hash, used to turn a difficulty
+// into a hash target (target = two256 / difficulty).
+var two256 = new(big.Int).Exp(big.NewInt(2), big.NewInt(256), nil)
+
+// initialBlockReward is the wei credited to a block's coinbase at genesis. It is
+// halved every halvingInterval blocks (Bitcoin-style), giving a capped, disinflationary
+// supply instead of perpetual fixed issuance. RandomX has no uncles, so there are
+// no uncle rewards.
+var initialBlockReward = uint256.NewInt(2e+18)
+
+// halvingInterval is the number of blocks between successive reward halvings.
+const halvingInterval = uint64(2_100_000)
+
+// calcBlockReward returns the block reward at the given height, halving every
+// halvingInterval blocks and reaching zero after 64 halvings.
+func calcBlockReward(number uint64) *uint256.Int {
+	halvings := number / halvingInterval
+	if halvings >= 64 {
+		return new(uint256.Int) // reward exhausted
+	}
+	reward := new(uint256.Int).Set(initialBlockReward)
+	reward.Rsh(reward, uint(halvings))
+	return reward
+}
+
+// Mode selects how strictly the engine validates proofs-of-work. The non-normal
+// modes exist for testing and development only.
+type Mode uint
+
+const (
+	ModeNormal   Mode = iota // Full RandomX verification.
+	ModeFake                 // Accept any seal, but still apply the other header rules.
+	ModeFullFake             // Accept any header without checking anything.
+)
+
+// Config holds the runtime configuration of a RandomX engine.
+type Config struct {
+	PowMode Mode
+
+	// FullMemory enables RandomX "fast" (full-dataset) mode for mining: a single
+	// ~2.3 GiB dataset is built once per epoch and shared by all mining threads,
+	// giving much faster hashing than the default light (cache-only) mode at the
+	// cost of memory. Header verification always uses light mode regardless.
+	FullMemory bool
+
+	// Threads is the number of parallel mining threads (and, in light mode, the
+	// number of ~256 MiB caches held). Zero or negative means one per CPU. Lower
+	// it on memory-constrained hosts.
+	Threads int
+
+	// Log is the destination for engine diagnostics. Defaults to the root logger.
+	Log log.Logger
+}
+
+// RandomX is a proof-of-work consensus engine implementing the RandomX algorithm.
+type RandomX struct {
+	config Config
+
+	// hasher is the shared RandomX instance used during header verification. It is
+	// guarded by lock because VerifyHeaders fans verification out over goroutines.
+	// Mining threads do NOT use this instance; they draw from the sealer pool below.
+	hasher Hasher
+	lock   sync.Mutex
+
+	// sealers is a pool of reusable hashers for the mining threads. Reusing them
+	// across blocks means the expensive RandomX cache is only rebuilt when the
+	// seed changes (once per epoch) instead of on every Seal. It is filled lazily
+	// on first use (see sealerPool in sealer.go).
+	sealers    chan Hasher
+	sealerInit sync.Once
+
+	closeOnce sync.Once
+}
+
+// New creates a full RandomX proof-of-work consensus engine.
+func New(config Config) *RandomX {
+	if config.Log == nil {
+		config.Log = log.Root()
+	}
+	r := &RandomX{config: config}
+	if config.PowMode == ModeNormal {
+		// Verification always uses light mode to keep validating nodes lean.
+		r.hasher = newHasher(false)
+	}
+	return r
+}
+
+// NewFaker creates a RandomX engine that accepts every seal as valid, while still
+// enforcing the remaining header rules. Useful for tests and dev networks.
+func NewFaker() *RandomX {
+	return &RandomX{config: Config{PowMode: ModeFake, Log: log.Root()}}
+}
+
+// NewFullFaker creates a RandomX engine that accepts every header unconditionally.
+func NewFullFaker() *RandomX {
+	return &RandomX{config: Config{PowMode: ModeFullFake, Log: log.Root()}}
+}
+
+// Close releases the resources held by the engine's verification hasher and the
+// mining sealer pool.
+func (r *RandomX) Close() error {
+	r.closeOnce.Do(func() {
+		if r.hasher != nil {
+			r.hasher.Close()
+		}
+		// Best-effort drain of the sealer pool. Mining is expected to be stopped
+		// before Close is called; any hasher still in flight leaks its C memory
+		// until process exit, which is acceptable at shutdown.
+		if r.sealers != nil {
+			for {
+				select {
+				case h := <-r.sealers:
+					h.Close()
+				default:
+					return
+				}
+			}
+		}
+	})
+	return nil
+}
+
+// Author implements consensus.Engine, returning the header's coinbase as the
+// proof-of-work verified author of the block.
+func (r *RandomX) Author(header *types.Header) (common.Address, error) {
+	return header.Coinbase, nil
+}
+
+// Prepare implements consensus.Engine, initializing the difficulty field of a
+// header to conform to the RandomX protocol. The change is done inline.
+func (r *RandomX) Prepare(chain consensus.ChainHeaderReader, header *types.Header) error {
+	parent := chain.GetHeader(header.ParentHash, header.Number.Uint64()-1)
+	if parent == nil {
+		return consensus.ErrUnknownAncestor
+	}
+	header.Difficulty = r.CalcDifficulty(chain, header.Time, parent)
+	return nil
+}
+
+// Finalize implements consensus.Engine, crediting the coinbase with the fixed
+// block reward. RandomX has no uncles, so no uncle rewards are paid.
+func (r *RandomX) Finalize(chain consensus.ChainHeaderReader, header *types.Header, state vm.StateDB, body *types.Body) {
+	reward := calcBlockReward(header.Number.Uint64())
+	if !reward.IsZero() {
+		state.AddBalance(header.Coinbase, reward, tracing.BalanceIncreaseRewardMineBlock)
+	}
+}
+
+// VerifyUncles implements consensus.Engine. RandomX does not support uncles, so
+// any block carrying uncles is rejected.
+func (r *RandomX) VerifyUncles(chain consensus.ChainReader, block *types.Block) error {
+	if r.config.PowMode == ModeFullFake {
+		return nil
+	}
+	if len(block.Uncles()) > 0 {
+		return errUnclesUnsupported
+	}
+	return nil
+}
+
+// SealHash returns the hash of a header prior to it being sealed, i.e. the hash
+// over every field except the proof-of-work solution (Nonce and MixDigest).
+func (r *RandomX) SealHash(header *types.Header) (hash common.Hash) {
+	hasher := keccak.NewLegacyKeccak256()
+
+	enc := []interface{}{
+		header.ParentHash,
+		header.UncleHash,
+		header.Coinbase,
+		header.Root,
+		header.TxHash,
+		header.ReceiptHash,
+		header.Bloom,
+		header.Difficulty,
+		header.Number,
+		header.GasLimit,
+		header.GasUsed,
+		header.Time,
+		header.Extra,
+	}
+	if header.BaseFee != nil {
+		enc = append(enc, header.BaseFee)
+	}
+	rlp.Encode(hasher, enc)
+	hasher.Sum(hash[:0])
+	return hash
+}

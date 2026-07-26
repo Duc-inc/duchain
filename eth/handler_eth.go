@@ -19,11 +19,13 @@ package eth
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/eth/protocols/eth"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 )
 
@@ -58,6 +60,9 @@ func (h *ethHandler) AcceptTxs() bool {
 func (h *ethHandler) Handle(peer *eth.Peer, packet eth.Packet) error {
 	// Consume any broadcasts and announces, forwarding the rest to the downloader
 	switch packet := packet.(type) {
+	case *eth.NewBlockPacket:
+		return h.handleNewBlock(peer, packet.Block)
+
 	case *eth.NewPooledTransactionHashesPacket:
 		return h.txFetcher.Notify(peer.ID(), packet.Types, packet.Sizes, packet.Hashes)
 
@@ -83,6 +88,183 @@ func (h *ethHandler) Handle(peer *eth.Peer, packet eth.Packet) error {
 
 	default:
 		return fmt.Errorf("unexpected eth packet type: %T", packet)
+	}
+}
+
+// handleNewBlock imports a block propagated by a peer on a RandomX proof-of-work
+// network. Import failures (e.g. an unknown ancestor because we're behind) are
+// logged but not returned, so the peer is not disconnected over them. A
+// successful import fires a ChainHeadEvent, which the broadcast loop relays on.
+func (h *ethHandler) handleNewBlock(peer *eth.Peer, block *types.Block) error {
+	if h.chain.Config().RandomX == nil {
+		// Ignore block gossip on non-PoW networks.
+		return nil
+	}
+	if block == nil {
+		return nil
+	}
+	// If the block is more than one ahead of our head, we're missing its
+	// ancestors. Backfill the gap from this peer instead of failing the import;
+	// the announced block will land once we've caught up.
+	head := h.chain.CurrentBlock().Number.Uint64()
+	if block.NumberU64() > head+1 {
+		h.startBackfill(peer, block.NumberU64())
+		return nil
+	}
+	if _, err := h.chain.InsertChain(types.Blocks{block}); err != nil {
+		log.Debug("Failed to import propagated block", "number", block.NumberU64(), "hash", block.Hash(), "err", err)
+		return nil
+	}
+	log.Info("Imported propagated block", "number", block.NumberU64(), "hash", block.Hash(), "peer", peer.ID())
+	return nil
+}
+
+// startBackfill launches the RandomX gap-sync toward target in the background,
+// unless one is already running.
+func (h *ethHandler) startBackfill(peer *eth.Peer, target uint64) {
+	if !h.backfilling.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer h.backfilling.Store(false)
+		h.backfill(peer, target)
+	}()
+}
+
+// backfill fetches and imports the missing blocks between our head and target by
+// requesting headers from the peer in batches. Our blocks carry no transactions
+// or uncles, so they are reconstructed from headers alone; tx-bearing chains
+// would additionally need RequestBodies here.
+func (h *ethHandler) backfill(peer *eth.Peer, target uint64) {
+	const batch = 128
+
+	// Find where our chain and the peer's chain last agree, so divergent forks
+	// (not just a strict prefix) are handled correctly.
+	ancestor := h.findCommonAncestor(peer, target)
+	log.Info("Starting RandomX chain backfill", "peer", peer.ID(), "target", target, "ancestor", ancestor)
+
+	next := ancestor + 1
+	for next <= target {
+		headers, err := h.fetchHeaders(peer, next, batch)
+		if err != nil || len(headers) == 0 {
+			log.Debug("RandomX backfill stopped", "from", next, "got", len(headers), "err", err)
+			return
+		}
+		blocks := h.assembleBlocks(peer, headers)
+		if _, err := h.chain.InsertChain(blocks); err != nil {
+			log.Debug("RandomX backfill import failed", "from", next, "err", err)
+			return
+		}
+		last := blocks[len(blocks)-1].NumberU64()
+		log.Info("RandomX backfill progress", "imported", next, "to", last, "target", target)
+		next = last + 1
+	}
+	log.Info("RandomX chain backfill complete", "head", h.chain.CurrentBlock().Number.Uint64())
+}
+
+// assembleBlocks turns a batch of headers into full blocks. For headers with a
+// non-empty body it fetches the bodies from the peer; empty blocks (the common
+// case for this chain) are reconstructed from the header alone. On any body
+// retrieval problem it falls back to headers-only, which is correct for empty
+// blocks and simply lets InsertChain reject if a body was actually required.
+func (h *ethHandler) assembleBlocks(peer *eth.Peer, headers []*types.Header) types.Blocks {
+	// Determine which headers carry a body.
+	needBodies := false
+	for _, hd := range headers {
+		if hd.TxHash != types.EmptyTxsHash || hd.UncleHash != types.EmptyUncleHash || hd.WithdrawalsHash != nil {
+			needBodies = true
+			break
+		}
+	}
+	var bodies []*eth.BlockBody
+	if needBodies {
+		hashes := make([]common.Hash, len(headers))
+		for i, hd := range headers {
+			hashes[i] = hd.Hash()
+		}
+		if fetched, err := h.fetchBodies(peer, hashes); err == nil && len(fetched) == len(headers) {
+			bodies = fetched
+		} else {
+			log.Debug("RandomX backfill: body fetch incomplete, using headers only", "err", err)
+		}
+	}
+	blocks := make(types.Blocks, 0, len(headers))
+	for i, hd := range headers {
+		block := types.NewBlockWithHeader(hd)
+		if bodies != nil {
+			txs, _ := bodies[i].Transactions.Items()
+			uncles, _ := bodies[i].Uncles.Items()
+			var withdrawals types.Withdrawals
+			if bodies[i].Withdrawals != nil {
+				withdrawals, _ = bodies[i].Withdrawals.Items()
+			}
+			block = block.WithBody(types.Body{Transactions: txs, Uncles: uncles, Withdrawals: withdrawals})
+		}
+		blocks = append(blocks, block)
+	}
+	return blocks
+}
+
+// fetchBodies performs a blocking request for the block bodies of the given hashes.
+func (h *ethHandler) fetchBodies(peer *eth.Peer, hashes []common.Hash) ([]*eth.BlockBody, error) {
+	resCh := make(chan *eth.Response, 1)
+	req, err := peer.RequestBodies(hashes, resCh)
+	if err != nil {
+		return nil, err
+	}
+	defer req.Close()
+
+	select {
+	case res := <-resCh:
+		resp := *res.Res.(*eth.BlockBodiesResponse)
+		res.Done <- nil
+		out := make([]*eth.BlockBody, len(resp))
+		for i := range resp {
+			out[i] = &resp[i]
+		}
+		return out, nil
+	case <-time.After(10 * time.Second):
+		return nil, errors.New("body request timed out")
+	}
+}
+
+// findCommonAncestor walks back from our head (capped at target) until our
+// canonical block hash matches the peer's header at the same height, returning
+// that block number. Falls back to genesis (0) if no match is found.
+func (h *ethHandler) findCommonAncestor(peer *eth.Peer, target uint64) uint64 {
+	from := h.chain.CurrentBlock().Number.Uint64()
+	if target < from {
+		from = target
+	}
+	for n := from; ; n-- {
+		ours := h.chain.GetHeaderByNumber(n)
+		hdrs, err := h.fetchHeaders(peer, n, 1)
+		if err == nil && len(hdrs) == 1 && ours != nil && ours.Hash() == hdrs[0].Hash() {
+			return n
+		}
+		if n == 0 {
+			return 0
+		}
+	}
+}
+
+// fetchHeaders performs a blocking request for up to amount contiguous headers
+// starting at block number from.
+func (h *ethHandler) fetchHeaders(peer *eth.Peer, from uint64, amount int) ([]*types.Header, error) {
+	resCh := make(chan *eth.Response, 1)
+	req, err := peer.RequestHeadersByNumber(from, amount, 0, false, resCh)
+	if err != nil {
+		return nil, err
+	}
+	defer req.Close()
+
+	select {
+	case res := <-resCh:
+		headers := *res.Res.(*eth.BlockHeadersRequest)
+		res.Done <- nil
+		return headers, nil
+	case <-time.After(10 * time.Second):
+		return nil, errors.New("header request timed out")
 	}
 }
 

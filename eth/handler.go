@@ -116,6 +116,8 @@ type handler struct {
 	networkID uint64
 	synced    atomic.Bool // Flag whether we're considered synchronised (enables transaction processing)
 
+	backfilling atomic.Bool // Single-flight guard for the RandomX backfill syncer
+
 	database ethdb.Database
 	txpool   txPool
 	chain    *core.BlockChain
@@ -423,6 +425,12 @@ func (h *handler) Start(maxPeers int) {
 	h.blockRange = newBlockRangeState(h.chain, h.downloader)
 	go h.blockRangeLoop(h.blockRange)
 
+	// On RandomX proof-of-work networks, gossip newly imported/mined blocks.
+	if h.chain.Config().RandomX != nil {
+		h.wg.Add(1)
+		go h.minedBroadcastLoop()
+	}
+
 	// start sync handlers
 	h.txFetcher.Start()
 
@@ -519,6 +527,48 @@ func (h *handler) txBroadcastLoop() {
 		case event := <-h.txsCh:
 			h.BroadcastTransactions(event.Txs)
 		case <-h.txsSub.Err():
+			return
+		}
+	}
+}
+
+// BroadcastBlock sends a block to every connected peer not already known to have
+// it. Used by RandomX proof-of-work networks to gossip locally mined and freshly
+// imported blocks.
+func (h *handler) BroadcastBlock(block *types.Block) {
+	hash := block.Hash()
+	var sent int
+	for _, peer := range h.peers.all() {
+		if peer.KnownBlock(hash) {
+			continue
+		}
+		if err := peer.SendNewBlock(block); err == nil {
+			sent++
+		}
+	}
+	if sent > 0 {
+		log.Trace("Propagated block", "hash", hash, "number", block.NumberU64(), "recipients", sent)
+	}
+}
+
+// minedBroadcastLoop relays every new chain head (locally mined or imported from
+// a peer) to the rest of the network. Only run on RandomX proof-of-work networks.
+func (h *handler) minedBroadcastLoop() {
+	defer h.wg.Done()
+
+	headCh := make(chan core.ChainHeadEvent, chainHeadChanSize)
+	sub := h.chain.SubscribeChainHeadEvent(headCh)
+	defer sub.Unsubscribe()
+
+	for {
+		select {
+		case ev := <-headCh:
+			if block := h.chain.GetBlock(ev.Header.Hash(), ev.Header.Number.Uint64()); block != nil {
+				h.BroadcastBlock(block)
+			}
+		case <-sub.Err():
+			return
+		case <-h.quitSync:
 			return
 		}
 	}

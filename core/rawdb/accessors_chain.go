@@ -348,6 +348,31 @@ func WriteHeader(db ethdb.KeyValueWriter, header *types.Header) {
 	}
 }
 
+// ReadTd retrieves a block's total difficulty corresponding to the hash.
+func ReadTd(db ethdb.KeyValueReader, hash common.Hash, number uint64) *big.Int {
+	data, err := db.Get(headerTDKey(number, hash))
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+	td := new(big.Int)
+	if err := rlp.DecodeBytes(data, td); err != nil {
+		log.Error("Invalid block total difficulty RLP", "hash", hash, "err", err)
+		return nil
+	}
+	return td
+}
+
+// WriteTd stores the total difficulty of a block into the database.
+func WriteTd(db ethdb.KeyValueWriter, hash common.Hash, number uint64, td *big.Int) {
+	data, err := rlp.EncodeToBytes(td)
+	if err != nil {
+		log.Crit("Failed to RLP encode block total difficulty", "err", err)
+	}
+	if err := db.Put(headerTDKey(number, hash), data); err != nil {
+		log.Crit("Failed to store block total difficulty", "err", err)
+	}
+}
+
 // DeleteHeader removes all block header data associated with a hash.
 func DeleteHeader(db ethdb.KeyValueWriter, hash common.Hash, number uint64) {
 	deleteHeaderWithoutNumber(db, hash, number)
