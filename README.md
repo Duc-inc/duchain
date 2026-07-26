@@ -7,7 +7,11 @@ standard Ethereum EVM, state machine, and JSON-RPC/tooling, and runs as an
 independent, PoW-secured chain — no beacon chain, no consensus client, no
 staking.
 
-> ⚠️ **Status: testnet, unaudited.** Do not attach real economic value. See
+The mainnet built with this code is **Ducros** (ticker **DUC**, chainId
+**271017**) — see [`mainnet/README.md`](mainnet/README.md). A separate
+`testnet/` (chainId 61102) exists for development/testing.
+
+> ⚠️ **Status: unaudited.** Do not attach real economic value without reading
 > [`SECURITY_REVIEW.md`](SECURITY_REVIEW.md) for the current security posture.
 
 ## What's different from upstream go-ethereum
@@ -39,9 +43,11 @@ staking.
 go build -tags randomx ./...      # requires librandomx, see consensus/randomx/README.md
 ```
 
-To launch a small multi-node testnet (bootnode + miners + RPC nodes), see
-[`testnet/README.md`](testnet/README.md) — it covers building, genesis
-parameters (chainId **61102**), bootstrapping, and tuning mining threads.
+- **Mainnet (Ducros / DUC)**: see [`mainnet/README.md`](mainnet/README.md). No
+  genesis file needed — the binary boots Ducros by default, same as upstream
+  geth boots real Ethereum mainnet with zero flags.
+- **Testnet**: see [`testnet/README.md`](testnet/README.md) — file-based
+  genesis (chainId **61102**), meant for development/iteration.
 
 ## Security
 

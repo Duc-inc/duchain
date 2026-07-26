@@ -1,8 +1,12 @@
-# duchain RandomX mainnet
+# Ducros (DUC) — the duchain RandomX mainnet
 
-The launch configuration for the duchain RandomX proof-of-work mainnet
-(chainId **271017**). These scripts wrap the `geth-randomx` binary; the actual
-hosting (servers, public IPs, DNS) is yours to provide.
+The launch configuration for **Ducros** (ticker **DUC**), the duchain RandomX
+proof-of-work mainnet (chainId **271017**). Unlike `testnet/`, this network's
+genesis is baked directly into the `geth-randomx` binary itself
+(`params.MainnetChainConfig` / `core.DefaultGenesisBlock()`) — the same way
+upstream go-ethereum embeds real Ethereum mainnet, so there is no
+`genesis.json` to distribute or keep in sync. These scripts just wrap the
+binary; the actual hosting (servers, public IPs, DNS) is yours to provide.
 
 ## 0. Prerequisites
 - Go ≥ 1.24 and `librandomx` installed (see `../consensus/randomx/README.md`).
@@ -45,7 +49,7 @@ live network.
 
 ## Treasury fee split (active on this network)
 A fixed **10%** of every transaction's fees is routed to two treasury addresses
-(consensus-critical, baked into `genesis.json` — identical on every node):
+(consensus-critical, baked into `params.MainnetChainConfig` — identical on every node):
 
 - `tipTreasury` — `0xEc4824ADdd1E160De6a13003bD2b815c2Fd969F6` — gets 10% of the priority fee (tip); the miner keeps the remaining 90%.
 - `baseFeeTreasury` — `0xf6d08E1255Dbd706C5e824FAC237352564DF987D` — gets 10% of the base fee that would otherwise be burned (EIP-1559); the remaining 90% is still burned as usual.

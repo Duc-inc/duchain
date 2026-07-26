@@ -8,9 +8,11 @@ set -euo pipefail
 # — the binary itself is generic, only the genesis/network below differ).
 GETH="${GETH:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/build/geth-randomx}"
 
-# Network identity. The network id MUST match the genesis chainId.
+# Network identity. Baked into the binary as params.MainnetChainConfig, same
+# as how upstream geth boots real Ethereum mainnet with zero flags — no
+# genesis.json to distribute or keep in sync (unlike testnet/, which is
+# file-based on purpose for easier iteration).
 NETWORK_ID="${NETWORK_ID:-271017}"
-GENESIS="${GENESIS:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/genesis.json}"
 
 # Comma-separated bootnode enodes that new nodes dial to discover the network.
 # Fill this in with your bootnode's enode (printed by bootnode.sh), including the
@@ -26,10 +28,8 @@ DATADIR="${DATADIR:-$HOME/.duchain}"
 EXTIP="${EXTIP:-}"
 
 init_if_needed() {
-  if [ ! -d "$DATADIR/geth/chaindata" ]; then
-    echo ">> Initialising genesis in $DATADIR"
-    "$GETH" --datadir "$DATADIR" init "$GENESIS"
-  fi
+  : # No-op: geth bootstraps params.MainnetChainConfig's embedded genesis
+    # automatically on first start when no genesis.json was ever `init`-ed.
 }
 
 nat_flag() {
