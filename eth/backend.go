@@ -121,9 +121,10 @@ type Ethereum struct {
 
 	APIBackend *EthAPIBackend
 
-	miner     *miner.Miner
-	minerExit chan struct{} // Closed to stop the RandomX proof-of-work mining loop
-	gasPrice  *big.Int
+	miner        *miner.Miner
+	minerExit    chan struct{}       // Closed to stop the RandomX proof-of-work mining loop
+	remoteSealer *miner.RemoteSealer // Serves eth_getWork/eth_submitWork/eth_submitHashrate on RandomX chains
+	gasPrice     *big.Int
 
 	networkID     uint64
 	netRPCService *ethapi.NetAPI
@@ -409,7 +410,7 @@ func (s *Ethereum) APIs() []rpc.API {
 	apis := ethapi.GetAPIs(s.APIBackend)
 
 	// Append all the local APIs and return
-	return append(apis, []rpc.API{
+	apis = append(apis, []rpc.API{
 		{
 			Namespace: "miner",
 			Service:   NewMinerAPI(s),
@@ -427,6 +428,17 @@ func (s *Ethereum) APIs() []rpc.API {
 			Service:   s.netRPCService,
 		},
 	}...)
+
+	// eth_getWork / eth_submitWork / eth_submitHashrate: only meaningful on
+	// RandomX (proof-of-work) chains, backed by the remote sealer started in
+	// Start(). See eth/api_mining.go.
+	if s.blockchain.Config().RandomX != nil {
+		apis = append(apis, rpc.API{
+			Namespace: "eth",
+			Service:   NewMiningAPI(s),
+		})
+	}
+	return apis
 }
 
 func (s *Ethereum) ResetWithGenesisBlock(gb *types.Block) {
@@ -487,6 +499,19 @@ func (s *Ethereum) Start() error {
 	if s.blockchain.Config().RandomX != nil && s.config.Miner.Mining {
 		s.minerExit = make(chan struct{})
 		go s.miner.MineRandomX(s.config.Miner.PendingFeeRecipient, s.minerExit)
+	}
+
+	// On RandomX networks, always serve the remote work RPC (eth_getWork /
+	// eth_submitWork / eth_submitHashrate), independent of local --mine: this
+	// is how external miners and mining pools get work, and matches how
+	// upstream go-ethereum always registered the ethash remote sealer
+	// regardless of local mining state.
+	if s.blockchain.Config().RandomX != nil {
+		remoteSealer, err := miner.NewRemoteSealer(s.miner, s.blockchain)
+		if err != nil {
+			return fmt.Errorf("failed to start RandomX remote sealer: %w", err)
+		}
+		s.remoteSealer = remoteSealer
 	}
 	return nil
 }
@@ -606,6 +631,12 @@ func (s *Ethereum) Stop() error {
 	if s.minerExit != nil {
 		close(s.minerExit)
 		s.minerExit = nil
+	}
+
+	// Stop the RandomX remote work RPC's background loop, if running.
+	if s.remoteSealer != nil {
+		s.remoteSealer.Stop()
+		s.remoteSealer = nil
 	}
 
 	// Stop all the peer-related stuff first.

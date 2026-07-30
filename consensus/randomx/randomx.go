@@ -216,6 +216,14 @@ func (r *RandomX) VerifyUncles(chain consensus.ChainReader, block *types.Block) 
 	return nil
 }
 
+// SeedHash returns the RandomX key (epoch seed) that a header at the given
+// block number is sealed and verified under. Exported for remote/external
+// mining (e.g. a pool's work RPC), which needs to hand the current seed to
+// miners without exposing the rest of the verifier's internals.
+func (r *RandomX) SeedHash(chain consensus.ChainHeaderReader, number uint64) []byte {
+	return seedHash(chain, number)
+}
+
 // SealHash returns the hash of a header prior to it being sealed, i.e. the hash
 // over every field except the proof-of-work solution (Nonce and MixDigest).
 func (r *RandomX) SealHash(header *types.Header) (hash common.Hash) {
