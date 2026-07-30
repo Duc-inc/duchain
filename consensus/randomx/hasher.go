@@ -50,6 +50,15 @@ type Hasher interface {
 //
 // (declared in the build-tagged binding files)
 
+// NewHasher exposes newHasher to callers outside this package that need to
+// compute RandomX hashes without a full consensus.Engine — e.g. a mining
+// pool verifying submitted shares against a pool difficulty target, which
+// VerifySeal cannot do since it only checks against a header's own (full
+// network) difficulty. Callers own the returned Hasher and must Close it.
+func NewHasher(fullMem bool) Hasher {
+	return newHasher(fullMem)
+}
+
 // seedHash returns the RandomX key for the given block number. To make the key
 // unpredictable (so miners cannot precompute RandomX caches/datasets for future
 // epochs), it is derived from the hash of a block in the past — the last block of
