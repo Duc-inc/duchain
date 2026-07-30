@@ -2,7 +2,7 @@
 # with Go source code. If you know what GOPATH is then you probably
 # don't need to bother with make.
 
-.PHONY: geth evm all test lint fmt clean devtools help
+.PHONY: geth evm all test lint fmt clean maj devtools help
 
 GOBIN = ./build/bin
 GO ?= latest
@@ -40,6 +40,12 @@ fmt:
 clean:
 	go clean -cache
 	rm -fr build/_workspace/pkg/ $(GOBIN)/*
+
+#
+maj:
+	echo "Major version update"
+	git pull
+	CGO_ENABLED=1 go build -tags randomx -o build/geth-randomx ./cmd/geth
 
 # The devtools target installs tools required for 'go generate'.
 # You need to put $GOBIN (or $GOPATH/bin) in your PATH to use 'go generate'.
