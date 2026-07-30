@@ -40,25 +40,17 @@ import (
 // into a hash target (target = two256 / difficulty).
 var two256 = new(big.Int).Exp(big.NewInt(2), big.NewInt(256), nil)
 
-// initialBlockReward is the wei credited to a block's coinbase at genesis. It is
-// halved every halvingInterval blocks (Bitcoin-style), giving a capped, disinflationary
-// supply instead of perpetual fixed issuance. RandomX has no uncles, so there are
-// no uncle rewards.
-var initialBlockReward = uint256.NewInt(2e+18)
+// blockReward is the wei credited to every block's coinbase, forever — a
+// fixed, uncapped issuance schedule (Ethereum PoW-style) rather than a
+// Bitcoin-style halving. RandomX has no uncles, so there are no uncle
+// rewards.
+var blockReward = uint256.NewInt(9e+18)
 
-// halvingInterval is the number of blocks between successive reward halvings.
-const halvingInterval = uint64(2_100_000)
-
-// calcBlockReward returns the block reward at the given height, halving every
-// halvingInterval blocks and reaching zero after 64 halvings.
+// calcBlockReward returns the block reward at the given height. The reward is
+// constant regardless of height; number is accepted for API stability (e.g.
+// if a future fork ever needs to change issuance at a given block).
 func calcBlockReward(number uint64) *uint256.Int {
-	halvings := number / halvingInterval
-	if halvings >= 64 {
-		return new(uint256.Int) // reward exhausted
-	}
-	reward := new(uint256.Int).Set(initialBlockReward)
-	reward.Rsh(reward, uint(halvings))
-	return reward
+	return new(uint256.Int).Set(blockReward)
 }
 
 // Mode selects how strictly the engine validates proofs-of-work. The non-normal

@@ -27,8 +27,8 @@ just `geth-randomx` with plain flags, like real geth. A separate `testnet/`
   60-block averaging window.
 - **Total-difficulty fork-choice** — reorgs happen on heaviest-chain (summed
   PoW), like pre-merge Ethereum, instead of LMD-GHOST/finality.
-- **Fixed block reward with halving** — 2 coins per block, halving every
-  2,100,000 blocks (Bitcoin-style), reaching zero after 64 halvings.
+- **Fixed, perpetual block reward** — 9 DUC per block, forever (Ethereum
+  PoW-style issuance, no halving, no supply cap).
 - **Optional treasury fee split** — genesis can route a fixed percentage of
   the priority fee and/or base fee to configured treasury addresses instead of
   paying it all to the miner / burning it. Opt-in, off by default.
