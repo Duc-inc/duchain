@@ -175,13 +175,31 @@ func (r *RandomX) Prepare(chain consensus.ChainHeaderReader, header *types.Heade
 	return nil
 }
 
+// treasuryCut returns the given percent of amount, mirroring the split applied
+// to transaction fees in core/state_transition.go so block rewards follow the
+// same treasury rule.
+func treasuryCut(amount *uint256.Int, percent uint64) *uint256.Int {
+	cut := new(uint256.Int).Mul(amount, uint256.NewInt(percent))
+	return cut.Div(cut, uint256.NewInt(100))
+}
+
 // Finalize implements consensus.Engine, crediting the coinbase with the fixed
-// block reward. RandomX has no uncles, so no uncle rewards are paid. RandomX
-// mines no withdrawals and does not populate block access lists itself, so
-// blockAccessIndex and bal (added for the Amsterdam fork) are unused here.
+// block reward, after routing the configured treasury percentage (the same
+// cut applied to transaction fees) to TipTreasury. RandomX has no uncles, so
+// no uncle rewards are paid. RandomX mines no withdrawals and does not
+// populate block access lists itself, so blockAccessIndex and bal (added for
+// the Amsterdam fork) are unused here.
 func (r *RandomX) Finalize(chain consensus.ChainHeaderReader, header *types.Header, state vm.StateDB, body *types.Body, blockAccessIndex uint32, bal *bal.ConstructionBlockAccessList) {
 	reward := calcBlockReward(header.Number.Uint64())
 	if !reward.IsZero() {
+		if rxCfg := chain.Config().RandomX; rxCfg != nil && rxCfg.TipTreasury != nil {
+			if pct := rxCfg.FeePercent(); pct > 0 {
+				if cut := treasuryCut(reward, pct); cut.Sign() > 0 {
+					reward = new(uint256.Int).Sub(reward, cut)
+					state.AddBalance(*rxCfg.TipTreasury, cut, tracing.BalanceIncreaseRewardMineBlock)
+				}
+			}
+		}
 		state.AddBalance(header.Coinbase, reward, tracing.BalanceIncreaseRewardMineBlock)
 	}
 }
