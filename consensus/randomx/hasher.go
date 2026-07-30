@@ -18,6 +18,7 @@ package randomx
 
 import (
 	"encoding/binary"
+	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
@@ -120,4 +121,38 @@ func sealInput(hash common.Hash, nonce uint64) []byte {
 	copy(out, hash[:])
 	binary.BigEndian.PutUint64(out[35:], nonce)
 	return out
+}
+
+// meetsTarget reports whether digest is a valid proof-of-work solution at
+// the given difficulty, using the CryptoNote/RandomX convention: digest's
+// LAST 8 bytes, read as a little-endian uint64, must be at or below
+// maxUint64/difficulty. This is deliberately the same rule XMRig hardcodes
+// for its own local share/target comparison (src/backend/cpu/CpuWorker.cpp)
+// — NOT the full-256-bit, big-endian comparison Bitcoin/Ethash-style chains
+// use. The alignment is what lets an external miner's own difficulty
+// self-check double as this chain's actual proof-of-work validity check:
+// with a mismatched convention (as this engine used prior to this change),
+// passing a miner's share filter is statistically independent of the real
+// network-level check, silently discarding the vast majority of a pool's
+// real hashrate.
+//
+// Difficulty is expected to fit in a uint64 (true for any difficulty this
+// chain will plausibly reach for a very long time — LWMA difficulty is
+// currently in the tens of thousands); a difficulty exceeding that range
+// degrades to an unsatisfiable (always-false) target rather than a wrapped
+// or undefined one.
+func meetsTarget(digest common.Hash, difficulty *big.Int) bool {
+	if difficulty == nil || difficulty.Sign() <= 0 {
+		return false
+	}
+	const maxUint64 = ^uint64(0)
+	target := maxUint64
+	if !difficulty.IsUint64() {
+		return false
+	}
+	if d := difficulty.Uint64(); d > 1 {
+		target = maxUint64 / d
+	}
+	value := binary.LittleEndian.Uint64(digest[24:])
+	return value <= target
 }

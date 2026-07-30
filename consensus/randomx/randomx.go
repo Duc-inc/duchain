@@ -21,7 +21,6 @@
 package randomx
 
 import (
-	"math/big"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -35,10 +34,6 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
 )
-
-// two256 is 2^256, the upper bound of a 256-bit hash, used to turn a difficulty
-// into a hash target (target = two256 / difficulty).
-var two256 = new(big.Int).Exp(big.NewInt(2), big.NewInt(256), nil)
 
 // blockReward is the wei credited to every block's coinbase, forever — a
 // fixed, uncapped issuance schedule (Ethereum PoW-style) rather than a

@@ -19,7 +19,6 @@ package randomx
 import (
 	crand "crypto/rand"
 	"encoding/binary"
-	"math/big"
 	"runtime"
 	"sync"
 
@@ -124,7 +123,6 @@ func (r *RandomX) mine(block *types.Block, key []byte, id, stride int, startNonc
 	var (
 		header   = block.Header()
 		hashSeal = r.SealHash(header)
-		target   = new(big.Int).Div(two256, header.Difficulty)
 		nonce    = startNonce
 		attempts = int64(0)
 	)
@@ -138,7 +136,7 @@ func (r *RandomX) mine(block *types.Block, key []byte, id, stride int, startNonc
 		default:
 			attempts++
 			digest := hasher.Hash(key, sealInput(hashSeal, nonce))
-			if new(big.Int).SetBytes(digest[:]).Cmp(target) <= 0 {
+			if meetsTarget(digest, header.Difficulty) {
 				// Found a valid nonce; seal a copy of the header with the solution.
 				sealed := types.CopyHeader(header)
 				sealed.Nonce = types.EncodeNonce(nonce)

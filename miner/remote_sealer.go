@@ -39,14 +39,22 @@ var errRemoteSealerStopped = errors.New("remote sealer is stopped")
 // before a new head still has a short grace window to submit it.
 const remoteWorkCacheSize = 8
 
-// two256 is 2^256, used to turn a difficulty into a hash target.
-var two256 = new(big.Int).Lsh(big.NewInt(1), 256)
+// maxUint64AsBig is 2^64-1, used to turn a difficulty into a RandomX hash
+// target using the CryptoNote/RandomX (Monero/XMRig) convention: only a
+// solution's LAST 8 bytes matter, read as a little-endian integer — not
+// the full 32-byte value. See consensus/randomx's meetsTarget for the
+// authoritative comparison rule this target is checked against, and why it
+// matters (it lets an external miner's own difficulty self-check double as
+// this chain's real proof-of-work validity check).
+var maxUint64AsBig = new(big.Int).SetUint64(^uint64(0))
 
-// targetFromDifficulty returns the RandomX hash target (2^256 / difficulty)
-// that a sealed header's digest must not exceed, mirroring the check in
-// consensus/randomx's verifySeal.
+// targetFromDifficulty returns the RandomX hash target (maxUint64 /
+// difficulty) that a sealed header's digest must not exceed. The returned
+// value always fits in 8 bytes; callers encoding it into a common.Hash (as
+// FetchWork does, for eth_getWork's wire format) get a big-endian value
+// with the target in its last 8 bytes and zeros before it.
 func targetFromDifficulty(diff *big.Int) *big.Int {
-	return new(big.Int).Div(two256, diff)
+	return new(big.Int).Div(maxUint64AsBig, diff)
 }
 
 // RemoteSealer bridges the RandomX consensus engine to external, RPC-driven

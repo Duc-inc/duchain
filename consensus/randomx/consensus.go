@@ -181,9 +181,10 @@ func (r *RandomX) verifyHeader(chain consensus.ChainHeaderReader, header, parent
 	return r.verifySeal(chain, header)
 }
 
-// verifySeal checks the RandomX proof-of-work of a header: the stored mix digest
-// must equal the RandomX hash of the seal input, and that hash, interpreted as a
-// 256-bit integer, must not exceed the target derived from the difficulty.
+// verifySeal checks the RandomX proof-of-work of a header: the stored mix
+// digest must equal the RandomX hash of the seal input, and that hash must
+// meet the target derived from the difficulty (see meetsTarget for the
+// exact, XMRig/Monero-compatible comparison rule).
 func (r *RandomX) verifySeal(chain consensus.ChainHeaderReader, header *types.Header) error {
 	if r.config.PowMode == ModeFake || r.config.PowMode == ModeFullFake {
 		return nil
@@ -201,8 +202,7 @@ func (r *RandomX) verifySeal(chain consensus.ChainHeaderReader, header *types.He
 	if header.MixDigest != digest {
 		return errInvalidMixDigest
 	}
-	target := new(big.Int).Div(two256, header.Difficulty)
-	if new(big.Int).SetBytes(digest[:]).Cmp(target) > 0 {
+	if !meetsTarget(digest, header.Difficulty) {
 		return errInvalidPoW
 	}
 	return nil
