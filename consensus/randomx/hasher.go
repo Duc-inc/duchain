@@ -98,12 +98,26 @@ func seedAvailable(chain consensus.ChainHeaderReader, number uint64) bool {
 	return chain.GetHeaderByNumber(seedNumber) != nil
 }
 
-// sealInput packs the sealing hash and nonce into the byte slice that is fed to
-// RandomX. The layout is the 32-byte seal hash followed by the 8-byte big-endian
-// nonce.
+// sealInput packs the sealing hash and nonce into the byte slice that is fed
+// to RandomX: the 32-byte seal hash, 3 zero-padding bytes, then the 8-byte
+// big-endian nonce (43 bytes total).
+//
+// The padding is deliberate, not incidental: it places the nonce's
+// low-order 4 bytes at absolute byte offset 39, which is the fixed offset
+// XMRig hardcodes for the RandomX family (see
+// src/base/net/stratum/Job.cpp's nonceOffset() in the XMRig source — it is
+// NOT derived from parsing this buffer, XMRig assumes it unconditionally).
+// That lets an external miner or mining pool feed XMRig this exact 43-byte
+// buffer as its stratum job "blob" and have XMRig's own RandomX hash be a
+// genuine, valid seal — rather than a pool needing to compute a second,
+// XMRig-incompatible hash purely to detect block-level solutions, which
+// silently discards the vast majority of a miner's real hashrate (every
+// hash XMRig tries and rejects on its own is invisible to the pool). The
+// nonce's high-order 4 bytes (offset 35..39) are untouched by XMRig, so a
+// pool is free to use them as a per-worker extranonce.
 func sealInput(hash common.Hash, nonce uint64) []byte {
-	out := make([]byte, 40)
+	out := make([]byte, 43)
 	copy(out, hash[:])
-	binary.BigEndian.PutUint64(out[32:], nonce)
+	binary.BigEndian.PutUint64(out[35:], nonce)
 	return out
 }
