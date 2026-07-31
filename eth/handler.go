@@ -446,6 +446,18 @@ func (h *handler) Start(maxPeers int) {
 	// start peer handler tracker
 	h.wg.Add(1)
 	go h.protoTracker()
+
+	// duchain: this fork never spins up upstream's legacy chainSync loop (it
+	// gossips newly mined/imported blocks directly via minedBroadcastLoop /
+	// handleNewBlock instead of the downloader-driven catch-up flow), so
+	// nothing was left to call enableSyncedFeatures. That callback existing
+	// only to flip AcceptTxs() true meant every node silently dropped every
+	// peer-relayed transaction forever (accepting a tx via local RPC still
+	// worked, since that path doesn't check AcceptTxs) — blocks propagated
+	// fine, but transactions never left the node they were submitted to.
+	// Mark synced immediately: a RandomX node has no separate
+	// consensus-client-driven sync phase to wait for.
+	h.enableSyncedFeatures()
 }
 
 func (h *handler) Stop() {
