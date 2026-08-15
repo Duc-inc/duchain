@@ -8,46 +8,32 @@
 
 package eth
 
-import (
-	"errors"
-	"fmt"
-	"time"
+import "time"
 
-	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/eth/protocols/eth"
-	"github.com/ethereum/go-ethereum/log"
-)
-
-const (
-	// catchupInterval is how often we check whether any peer is ahead of us.
-	catchupInterval = 5 * time.Second
-
-	// catchupBatchSize caps how many blocks are requested in a single round,
-	// so a node that's far behind catches up gradually across several ticks
-	// instead of issuing one huge request.
-	catchupBatchSize = 192
-
-	// catchupTimeout bounds how long we wait for a peer to answer a single
-	// headers or bodies request before giving up on that round.
-	catchupTimeout = 10 * time.Second
-)
+// catchupInterval is how often we check whether any connected peer is ahead
+// of our local chain.
+const catchupInterval = 5 * time.Second
 
 // catchupLoop periodically checks whether any connected peer is ahead of our
-// local chain and, if so, downloads and imports the blocks we're missing.
+// local chain and, if so, triggers the existing RandomX backfill mechanism
+// (startBackfill/backfill in handler_eth.go) to pull the missing blocks.
 //
-// duchain never runs upstream's downloader-driven sync: new blocks only ever
-// reach a node via direct gossip from a peer that happens to be connected at
-// the exact moment the block is mined or imported (see minedBroadcastLoop).
-// A node that joins the network late, restarts, or merely has its connection
-// to an actively-mining peer drop for a few seconds has no way to recover the
-// blocks it missed — gossip only ever carries new blocks forward, it never
-// fills gaps behind. This loop is that missing gap-filler: it polls peers'
-// advertised block range (BlockRangeUpdatePacket, already exchanged over the
-// eth wire protocol) and, when behind, pulls headers and bodies directly and
-// feeds them to InsertChain, which already implements the total-difficulty
-// fork-choice rule — this loop only decides *when* to fetch, never which
-// chain wins.
+// Without this, backfill only ever fires reactively, from inside
+// handleNewBlock, when a freshly gossiped block turns out to be more than
+// one ahead of our head. A node that's behind but doesn't happen to receive
+// a fresh gossiped block while connected — or whose connection to an
+// actively-mining peer keeps dropping and re-establishing — never gets that
+// trigger and stays stuck indefinitely, since duchain runs no other sync
+// path (see f23e14bab). Root-caused live: the RPC node sat at block 0 for
+// ~20 minutes with a stable peer at block 186+, because no NewBlock gossip
+// ever happened to land during a connected window.
+//
+// This loop is the missing proactive trigger. It doesn't fetch anything
+// itself — it just periodically asks "is any peer ahead of me?" and, if so,
+// hands off to the same backfill() that already does proper common-ancestor
+// resolution and peer banning on bad data. startBackfill's CompareAndSwap
+// guard makes it safe to call repeatedly even if a reactive backfill from
+// handleNewBlock is already in flight.
 func (h *handler) catchupLoop() {
 	defer h.wg.Done()
 
@@ -64,8 +50,8 @@ func (h *handler) catchupLoop() {
 	}
 }
 
-// tryCatchup fetches and imports one batch of blocks from whichever connected
-// peer reports the highest block, if that peer is ahead of our local head.
+// tryCatchup finds whichever connected peer reports the highest block and,
+// if it's ahead of our local head, triggers a backfill from it.
 func (h *handler) tryCatchup() {
 	var (
 		best      *ethPeer
@@ -81,119 +67,8 @@ func (h *handler) tryCatchup() {
 			bestBlock = rng.LatestBlock
 		}
 	}
-	if best == nil {
+	if best == nil || bestBlock <= h.chain.CurrentBlock().Number.Uint64() {
 		return
 	}
-
-	local := h.chain.CurrentBlock().Number.Uint64()
-	if bestBlock <= local {
-		return
-	}
-
-	from := local + 1
-	amount := int(bestBlock - local)
-	if amount > catchupBatchSize {
-		amount = catchupBatchSize
-	}
-
-	headers, err := h.catchupFetchHeaders(best, from, amount)
-	if err != nil {
-		log.Debug("Catch-up header fetch failed", "peer", best.ID(), "from", from, "err", err)
-		return
-	}
-	if len(headers) == 0 {
-		return
-	}
-
-	blocks, err := h.catchupFetchBodies(best, headers)
-	if err != nil {
-		log.Debug("Catch-up body fetch failed", "peer", best.ID(), "from", from, "err", err)
-		return
-	}
-
-	if _, err := h.chain.InsertChain(blocks); err != nil {
-		log.Warn("Catch-up chain insertion failed", "peer", best.ID(), "from", from, "count", len(blocks), "err", err)
-		return
-	}
-	log.Info("Caught up blocks from peer", "peer", best.ID(), "from", from, "count", len(blocks),
-		"head", h.chain.CurrentBlock().Number.Uint64())
-}
-
-// catchupFetchHeaders requests a batch of headers starting at the given
-// block number and blocks until the peer answers or the request times out.
-func (h *handler) catchupFetchHeaders(peer *ethPeer, from uint64, amount int) ([]*types.Header, error) {
-	resCh := make(chan *eth.Response)
-	req, err := peer.RequestHeadersByNumber(from, amount, 0, false, resCh)
-	if err != nil {
-		return nil, err
-	}
-	defer req.Close()
-
-	timer := time.NewTimer(catchupTimeout)
-	defer timer.Stop()
-
-	select {
-	case <-timer.C:
-		return nil, errors.New("timeout waiting for headers")
-	case res := <-resCh:
-		headers := *res.Res.(*eth.BlockHeadersRequest)
-		res.Done <- nil
-		return headers, nil
-	}
-}
-
-// catchupFetchBodies requests bodies for the given headers, blocks until the
-// peer answers or the request times out, and assembles full blocks.
-func (h *handler) catchupFetchBodies(peer *ethPeer, headers []*types.Header) (types.Blocks, error) {
-	hashes := make([]common.Hash, len(headers))
-	for i, header := range headers {
-		hashes[i] = header.Hash()
-	}
-
-	resCh := make(chan *eth.Response)
-	req, err := peer.RequestBodies(hashes, resCh)
-	if err != nil {
-		return nil, err
-	}
-	defer req.Close()
-
-	timer := time.NewTimer(catchupTimeout)
-	defer timer.Stop()
-
-	var bodies eth.BlockBodiesResponse
-	select {
-	case <-timer.C:
-		return nil, errors.New("timeout waiting for bodies")
-	case res := <-resCh:
-		bodies = *res.Res.(*eth.BlockBodiesResponse)
-		res.Done <- nil
-	}
-	if len(bodies) != len(headers) {
-		return nil, fmt.Errorf("peer sent %d bodies for %d headers", len(bodies), len(headers))
-	}
-
-	blocks := make(types.Blocks, len(headers))
-	for i, header := range headers {
-		txs, err := bodies[i].Transactions.Items()
-		if err != nil {
-			return nil, fmt.Errorf("body %d: bad transactions: %w", i, err)
-		}
-		uncles, err := bodies[i].Uncles.Items()
-		if err != nil {
-			return nil, fmt.Errorf("body %d: bad uncles: %w", i, err)
-		}
-		var withdrawals []*types.Withdrawal
-		if bodies[i].Withdrawals != nil {
-			withdrawals, err = bodies[i].Withdrawals.Items()
-			if err != nil {
-				return nil, fmt.Errorf("body %d: bad withdrawals: %w", i, err)
-			}
-		}
-		blocks[i] = types.NewBlockWithHeader(header).WithBody(types.Body{
-			Transactions: txs,
-			Uncles:       uncles,
-			Withdrawals:  withdrawals,
-		})
-	}
-	return blocks, nil
+	(*ethHandler)(h).startBackfill(best.Peer, bestBlock)
 }
