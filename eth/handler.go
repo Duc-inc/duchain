@@ -492,6 +492,12 @@ func (h *handler) Start(maxPeers int) {
 	if h.chain.Config().RandomX != nil {
 		h.wg.Add(1)
 		go h.minedBroadcastLoop()
+
+		// Gossip alone only ever carries new blocks forward; it can't fill
+		// gaps for a node that joined late or reconnected. catchupLoop is
+		// the fallback that pulls missed blocks directly from peers.
+		h.wg.Add(1)
+		go h.catchupLoop()
 	}
 
 	// start sync handlers
