@@ -21,7 +21,7 @@ import "github.com/ethereum/go-ethereum/common"
 // MainnetBootnodes are the enode URLs of the P2P bootstrap nodes running on
 // the Ducros (duchain RandomX) mainnet.
 var MainnetBootnodes = []string{
-	"enode://d1fe5ade5f97a428dec09159d9dc14236a66ca19a210e5c36acdd112f55b2ed0d13985dfa7abefcb003e71f58ac8f4d296c1ce761df62e9c45c7eaef1f41105a@135.125.102.6:30303",
+	"enode://159644888c93d4827f78f29e7a1c2da642770843c2681879cca581e89a50e38861cbc86a1443464e3a2ae8c94ed911072de5b7bf335ebaa121d5c7d4551dad35@135.125.102.6:30303",
 }
 
 // HoodiBootnodes are the enode URLs of the P2P bootstrap nodes running on the
