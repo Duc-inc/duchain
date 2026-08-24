@@ -51,6 +51,7 @@ var (
 		utils.IdentityFlag,
 		utils.PasswordFileFlag,
 		utils.BootnodesFlag,
+		utils.StaticNodesFlag,
 		utils.MinFreeDiskSpaceFlag,
 		utils.KeyStoreDirFlag,
 		utils.ExternalSignerFlag,

@@ -931,6 +931,12 @@ var (
 		Value:    "",
 		Category: flags.NetworkingCategory,
 	}
+	StaticNodesFlag = &cli.StringFlag{
+		Name:     "staticnodes",
+		Usage:    "Comma separated enode URLs to keep permanently connected to, regardless of discovery",
+		Value:    "",
+		Category: flags.NetworkingCategory,
+	}
 	NodeKeyFileFlag = &cli.StringFlag{
 		Name:     "nodekey",
 		Usage:    "P2P node key file",
@@ -1278,6 +1284,22 @@ func setBootstrapNodes(ctx *cli.Context, cfg *p2p.Config) {
 	cfg.BootstrapNodes = mustParseBootnodes(urls)
 }
 
+// setStaticNodes creates a list of static nodes from the command line flags,
+// reverting to pre-configured ones if none have been specified. Unlike
+// bootstrap nodes (used once to seed discovery), static nodes are dialed and
+// redialed for the lifetime of the process, which is what actually keeps a
+// small network like Ducros mainnet meshed -- discovery alone gets drowned
+// out by unrelated public devp2p scanner traffic (see MainnetStaticNodes).
+func setStaticNodes(ctx *cli.Context, cfg *p2p.Config) {
+	urls := params.MainnetStaticNodes
+	if ctx.IsSet(StaticNodesFlag.Name) {
+		urls = SplitAndTrim(ctx.String(StaticNodesFlag.Name))
+	} else if cfg.StaticNodes != nil {
+		return // Already set by config file, don't apply defaults.
+	}
+	cfg.StaticNodes = mustParseBootnodes(urls)
+}
+
 func mustParseBootnodes(urls []string) []*enode.Node {
 	nodes := make([]*enode.Node, 0, len(urls))
 	for _, url := range urls {
@@ -1517,6 +1539,7 @@ func SetP2PConfig(ctx *cli.Context, cfg *p2p.Config) {
 	setListenAddress(ctx, cfg)
 	setBootstrapNodes(ctx, cfg)
 	setBootstrapNodesV5(ctx, cfg)
+	setStaticNodes(ctx, cfg)
 
 	if ctx.IsSet(MaxPeersFlag.Name) {
 		cfg.MaxPeers = ctx.Int(MaxPeersFlag.Name)
