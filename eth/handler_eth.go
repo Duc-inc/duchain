@@ -213,9 +213,8 @@ func (h *ethHandler) startBackfill(peer *eth.Peer, target uint64) {
 }
 
 // backfill fetches and imports the missing blocks between our head and target by
-// requesting headers from the peer in batches. Our blocks carry no transactions
-// or uncles, so they are reconstructed from headers alone; tx-bearing chains
-// would additionally need RequestBodies here.
+// requesting headers from the peer in batches, plus bodies for any header that
+// actually carries transactions/uncles/withdrawals.
 func (h *ethHandler) backfill(peer *eth.Peer, target uint64) {
 	const batch = 128
 
@@ -231,7 +230,14 @@ func (h *ethHandler) backfill(peer *eth.Peer, target uint64) {
 			log.Debug("RandomX backfill stopped", "from", next, "got", len(headers), "err", err)
 			return
 		}
-		blocks := h.assembleBlocks(peer, headers)
+		blocks, err := h.assembleBlocks(peer, headers)
+		if err != nil {
+			// A body request timing out or coming back short is this peer being
+			// slow/unresponsive, not proof of a bad block: don't strike it, just
+			// give up on this attempt and let the next announcement retry.
+			log.Debug("RandomX backfill: body fetch failed", "from", next, "err", err)
+			return
+		}
 		if _, err := h.chain.InsertChain(blocks); err != nil {
 			// We asked this peer for its canonical chain from a common ancestor,
 			// so consensus-invalid data here is the peer's fault: strike it, and
@@ -251,12 +257,14 @@ func (h *ethHandler) backfill(peer *eth.Peer, target uint64) {
 	log.Info("RandomX chain backfill complete", "head", h.chain.CurrentBlock().Number.Uint64())
 }
 
-// assembleBlocks turns a batch of headers into full blocks. For headers with a
-// non-empty body it fetches the bodies from the peer; empty blocks (the common
-// case for this chain) are reconstructed from the header alone. On any body
-// retrieval problem it falls back to headers-only, which is correct for empty
-// blocks and simply lets InsertChain reject if a body was actually required.
-func (h *ethHandler) assembleBlocks(peer *eth.Peer, headers []*types.Header) types.Blocks {
+// assembleBlocks turns a batch of headers into full blocks. Headers with an
+// empty body (no txs/uncles/withdrawals) are reconstructed from the header
+// alone; any other header requires its body fetched from the peer. A failed
+// or short body fetch is reported as an error rather than silently falling
+// back to a headers-only reconstruction, which would build a block whose
+// computed tx/uncle root can't match the header and gets flagged as a bad
+// block from an innocent peer.
+func (h *ethHandler) assembleBlocks(peer *eth.Peer, headers []*types.Header) (types.Blocks, error) {
 	// Determine which headers carry a body.
 	needBodies := false
 	for _, hd := range headers {
@@ -271,11 +279,14 @@ func (h *ethHandler) assembleBlocks(peer *eth.Peer, headers []*types.Header) typ
 		for i, hd := range headers {
 			hashes[i] = hd.Hash()
 		}
-		if fetched, err := h.fetchBodies(peer, hashes); err == nil && len(fetched) == len(headers) {
-			bodies = fetched
-		} else {
-			log.Debug("RandomX backfill: body fetch incomplete, using headers only", "err", err)
+		fetched, err := h.fetchBodies(peer, hashes)
+		if err != nil {
+			return nil, err
 		}
+		if len(fetched) != len(headers) {
+			return nil, fmt.Errorf("got %d bodies, wanted %d", len(fetched), len(headers))
+		}
+		bodies = fetched
 	}
 	blocks := make(types.Blocks, 0, len(headers))
 	for i, hd := range headers {
@@ -291,7 +302,7 @@ func (h *ethHandler) assembleBlocks(peer *eth.Peer, headers []*types.Header) typ
 		}
 		blocks = append(blocks, block)
 	}
-	return blocks
+	return blocks, nil
 }
 
 // fetchBodies performs a blocking request for the block bodies of the given hashes.
