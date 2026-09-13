@@ -44,7 +44,8 @@ clean:
 #
 maj:
 	echo "Major version update"
-	git pull
+	git fetch origin main
+	git reset --hard origin/main
 	CGO_ENABLED=1 go build -tags randomx -o build/geth-randomx ./cmd/geth
 
 # The devtools target installs tools required for 'go generate'.
